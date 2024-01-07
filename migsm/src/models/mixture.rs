@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
@@ -27,6 +28,7 @@ where
     pub(crate) empty_stat: Fx::Stat,
     pub(crate) _phantom_x: PhantomData<X>,
     pub(crate) _phantom_fx: PhantomData<Fx>,
+    pub(crate) component_weights: OnceCell<Vec<f64>>,
 }
 
 impl<X, Fx, Pr> std::fmt::Debug for ConjugateMixtureModel<X, Fx, Pr>
@@ -100,6 +102,7 @@ where
             counts,
             _phantom_x: PhantomData,
             _phantom_fx: PhantomData,
+            component_weights: OnceCell::new(),
         }
     }
 
@@ -146,6 +149,7 @@ where
             counts,
             _phantom_x: PhantomData,
             _phantom_fx: PhantomData,
+            component_weights: OnceCell::new(),
         }
     }
 
@@ -160,7 +164,10 @@ where
             if *assign == Some(swap_from) {
                 *assign = Some(partition_index);
             }
-        })
+        });
+
+        // reset weight cache
+        self.component_weights.take();
     }
 }
 
@@ -187,6 +194,21 @@ where
         );
         self.crp.ln_f(&part)
     }
+
+    fn component_weights(&self) -> &[f64] {
+        self.component_weights.get_or_init(|| {
+            let weights: Vec<f64> = self
+                .counts
+                .iter()
+                .map(|x| *x as f64)
+                .chain(std::iter::once(self.crp.alpha()))
+                .collect();
+
+            // Normalize the weights
+            let weight_sum: f64 = weights.iter().sum();
+            weights.into_iter().map(|w| w / weight_sum).collect()
+        })
+    }
 }
 
 impl<X, Fx, Pr> rv::traits::Rv<X> for ConjugateMixtureModel<X, Fx, Pr>
@@ -211,18 +233,7 @@ where
         // TODO: Add empty component weight and empty posterior predictive
 
         // Component weights
-        let weights: Vec<f64> = {
-            let weights: Vec<f64> = self
-                .counts
-                .iter()
-                .map(|x| *x as f64)
-                .chain(std::iter::once(self.crp.alpha()))
-                .collect();
-
-            // Normalize the weights
-            let weight_sum: f64 = weights.iter().sum();
-            weights.into_iter().map(|w| w / weight_sum).collect()
-        };
+        let weights: &[f64] = self.component_weights();
 
         let ln_ps: Vec<f64> = weights
             .into_iter()
@@ -234,19 +245,7 @@ where
     }
 
     fn draw<R: Rng>(&self, rng: &mut R) -> X {
-        let weights: Vec<f64> = {
-            let weights: Vec<f64> = self
-                .counts
-                .iter()
-                .map(|x| *x as f64)
-                .chain(std::iter::once(self.crp.alpha()))
-                .collect();
-
-            // Normalize the weights
-            let weight_sum: f64 = weights.iter().sum();
-            weights.into_iter().map(|w| w / weight_sum).collect()
-        };
-
+        let weights: &[f64] = self.component_weights();
         let component_idx = pflip(&weights, 1, rng)[0];
 
         if component_idx < self.partition_stats.len() {
@@ -309,6 +308,9 @@ where
         self.assignments[idx] = Some(partition_index);
         self.partition_stats[partition_index].observe(&data[idx]);
         self.counts[partition_index] += 1;
+
+        // reset weight cache
+        self.component_weights.take();
     }
 
     fn unassign(&mut self, idx: usize, data: &D) {
@@ -325,6 +327,9 @@ where
                 }
             }
         }
+
+        // reset weight cache
+        self.component_weights.take();
     }
 
     fn ln_pp_partition(&self, x: &X, partition_index: usize) -> f64 {

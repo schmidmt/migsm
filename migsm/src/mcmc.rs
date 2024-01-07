@@ -12,7 +12,7 @@ pub struct Link<M> {
 }
 
 /// Trait for Markov Chain Monte Carlo Samplers.
-pub trait Sampler<M, D>
+pub trait Sampler<M, D>: Sized
 where
     M: Model<D>,
 {
@@ -23,66 +23,35 @@ where
     fn multi_step<R: Rng>(&mut self, model: M, data: &D, steps: usize, rng: &mut R) -> M {
         (0..steps).fold(model, |acc, _| self.step(acc, data, rng))
     }
-}
 
-pub struct McmcSamplerIter<'a, S, M, D, R>
-where
-    R: Rng,
-    S: Sampler<M, D> + ?Sized,
-    M: Model<D>,
-{
-    sampler: &'a mut S,
-    rng: &'a mut R,
-    thinning: usize,
-    data: &'a D,
-    current_model: Option<M>,
-}
-
-pub trait McmcSamplerIterable<'a, M, D>: Sampler<M, D>
-where
-    M: Model<D>,
-{
-    /// Create an iterator that steps over each successive state of the
-    fn iter_step<'b: 'a, R: Rng>(
-        &'b mut self,
+    fn iter_sample<'a, T, F: Fn(&M) -> T + 'a, R: Rng>(
+        &mut self,
         model: M,
         data: &'a D,
-        thinning: usize,
-        rng: &'b mut R,
-    ) -> McmcSamplerIter<'a, Self, M, D, R> {
-        McmcSamplerIter {
-            sampler: self,
-            rng,
-            thinning,
-            data,
-            current_model: Some(model),
-        }
+        rng: &'a mut R,
+        f: F,
+    ) -> impl Iterator<Item = T> {
+        (0..).scan(model, move |model, _| {
+            take(model, |model| self.step(model, data, rng));
+
+            Some(f(model))
+        })
     }
 }
 
-impl<'a, S, M, D, R> Iterator for McmcSamplerIter<'a, S, M, D, R>
+fn take<T, F>(mut_ref: &mut T, closure: F)
 where
-    S: Sampler<M, D> + ?Sized,
-    M: Model<D> + Clone,
-    R: Rng,
+    F: FnOnce(T) -> T,
 {
-    type Item = M;
-    fn next(&mut self) -> Option<M> {
-        let model = self.current_model.take().expect("Model should be defined.");
-        let model = self
-            .sampler
-            .multi_step(model, self.data, self.thinning + 1, self.rng);
+    use std::ptr;
 
-        self.current_model = Some(model.clone());
-        Some(model)
+    unsafe {
+        let old_t = ptr::read(mut_ref);
+        let new_t = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| closure(old_t)))
+            .unwrap_or_else(|_| ::std::process::abort());
+
+        ptr::write(mut_ref, new_t);
     }
-}
-
-impl<'a, S, M, D> McmcSamplerIterable<'a, M, D> for S
-where
-    S: Sampler<M, D>,
-    M: Model<D>,
-{
 }
 
 #[derive(Clone, Debug)]

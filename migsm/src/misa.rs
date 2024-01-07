@@ -16,11 +16,11 @@
 //! }
 //! ```
 
-use std::fs::File;
+use std::marker::PhantomData;
+use std::num::NonZeroUsize;
 
 use nalgebra::{dvector, DMatrix, DVector};
 use rand::Rng;
-use rv::misc::linspace;
 use rv::prelude::{NormalGamma, NormalInvWishart};
 use rv::traits::Rv;
 
@@ -30,42 +30,83 @@ use crate::models::mixture::ConjugateMixtureModel;
 use crate::models::Model;
 
 #[derive(Debug, Clone)]
-struct InnerMDS<YM, YD, YS, JM, JD, JS>
+struct InnerModels<YD, JD, YM, JM>
 where
     YM: Model<YD>,
     JM: Model<JD>,
-    YS: Sampler<YM, YD>,
-    JS: Sampler<JM, JD>,
 {
-    y: YD,
     y_model: YM,
-    y_model_sampler: YS,
-    joints: Vec<JD>,
     joint_models: Vec<JM>,
-    joint_model_samplers: Vec<JS>,
+    _phantom_yd: PhantomData<YD>,
+    _phantom_jd: PhantomData<JD>,
 }
 
-impl<YM, YD, YS, JM, JD, JS> InnerMDS<YM, YD, YS, JM, JD, JS>
+#[derive(Debug, Clone)]
+struct InnerData<YD, JD> {
+    y: YD,
+    joints: Vec<JD>,
+}
+
+struct InnerSampler<YD, JD, YM, JM, YS, JS>
 where
     YM: Model<YD>,
     JM: Model<JD>,
     YS: Sampler<YM, YD>,
     JS: Sampler<JM, JD>,
 {
-    pub fn step<R: Rng>(mut self, rng: &mut R) -> Self {
-        let y_model = self.y_model_sampler.step(self.y_model, &self.y, rng);
+    y_sampler: YS,
+    joint_samplers: Vec<JS>,
+    _phantom_yd: PhantomData<YD>,
+    _phantom_jd: PhantomData<JD>,
+    _phantom_ym: PhantomData<YM>,
+    _phantom_jm: PhantomData<JM>,
+}
+
+impl<YD, JD, YM, JM> Model<InnerData<YD, JD>> for InnerModels<YD, JD, YM, JM>
+where
+    YM: Model<YD>,
+    JM: Model<JD>,
+{
+    fn ln_score(&self, data: &InnerData<YD, JD>) -> f64 {
+        self.y_model.ln_score(&data.y)
+            + self
+                .joint_models
+                .iter()
+                .zip(data.joints.iter())
+                .map(|(m, d)| m.ln_score(d))
+                .sum::<f64>()
+    }
+}
+
+impl<YD, JD, YM, JM, YS, JS> Sampler<InnerModels<YD, JD, YM, JM>, InnerData<YD, JD>>
+    for InnerSampler<YD, JD, YM, JM, YS, JS>
+where
+    YM: Model<YD>,
+    JM: Model<JD>,
+    YS: Sampler<YM, YD>,
+    JS: Sampler<JM, JD>,
+{
+    fn step<R: Rng>(
+        &mut self,
+        model: InnerModels<YD, JD, YM, JM>,
+        data: &InnerData<YD, JD>,
+        rng: &mut R,
+    ) -> InnerModels<YD, JD, YM, JM> {
+        let y_model = self.y_sampler.step(model.y_model, &data.y, rng);
+
         let joint_models = self
-            .joint_models
-            .into_iter()
-            .zip(self.joints.iter())
-            .zip(self.joint_model_samplers.iter_mut())
-            .map(|((m, joint), sampler)| sampler.step(m, &joint, rng))
+            .joint_samplers
+            .iter_mut()
+            .zip(model.joint_models.into_iter())
+            .zip(data.joints.iter())
+            .map(|((sampler, model), data)| sampler.step(model, data, rng))
             .collect();
 
-        Self {
+        InnerModels {
             y_model,
             joint_models,
-            ..self
+            _phantom_yd: PhantomData,
+            _phantom_jd: PhantomData,
         }
     }
 }
@@ -75,7 +116,7 @@ pub fn deltas<F, R>(
     n_params: usize,
     n: usize,
     warmup: usize,
-    thinning: usize,
+    thinning: NonZeroUsize,
     rng: &mut R,
 ) -> Vec<Vec<f64>>
 where
@@ -96,56 +137,48 @@ where
         })
         .collect();
 
-    let y_model = ConjugateMixtureModel::new(
-        NormalGamma::new(0.0, 1.0, 1.0, 1.0).unwrap(),
-        y.iter(),
-        1.0,
-        rng,
-    );
+    let data = InnerData { y, joints };
 
-    // A model of joint samples for each parameter
-    let joint_models = joints
-        .iter()
-        .map(|xy| {
-            ConjugateMixtureModel::new(
-                NormalInvWishart::new(DVector::zeros(2), 1.0, 2, DMatrix::identity(2, 2))
-                    .expect("Should be valid"),
-                xy.iter(),
-                1.0,
-                rng,
-            )
-        })
-        .collect();
-
-    let joint_model_samplers = joints.iter().map(|_| PartitionGibbs::new()).collect();
-
-    let mds = InnerMDS {
-        y,
-        y_model,
-        y_model_sampler: PartitionGibbs::new(),
-        joints,
-        joint_models,
-        joint_model_samplers,
+    let model = InnerModels {
+        y_model: ConjugateMixtureModel::new(
+            NormalGamma::new(0.0, 1.0, 1.0, 1.0).unwrap(),
+            data.y.iter(),
+            1.0,
+            rng,
+        ),
+        joint_models: data
+            .joints
+            .iter()
+            .map(|xy| {
+                ConjugateMixtureModel::new(
+                    NormalInvWishart::new(DVector::zeros(2), 1.0, 2, DMatrix::identity(2, 2))
+                        .expect("Should be valid"),
+                    xy.iter(),
+                    1.0,
+                    rng,
+                )
+            })
+            .collect(),
+        _phantom_yd: PhantomData,
+        _phantom_jd: PhantomData,
     };
 
-    // Warm-up stage
-    let mds = (0..warmup).fold(mds, |mds, _| mds.step(rng));
+    let mut sampler = InnerSampler {
+        y_sampler: PartitionGibbs::new(),
+        joint_samplers: data.joints.iter().map(|_| PartitionGibbs::new()).collect(),
+        _phantom_yd: PhantomData,
+        _phantom_jd: PhantomData,
+        _phantom_ym: PhantomData,
+        _phantom_jm: PhantomData,
+    };
 
-    // Sample Deltas
-    let res = (0..(thinning * n))
-        .scan(mds, |mds, _| {
-            let new_mds = mds.clone().step(rng);
+    sampler
+        .iter_sample(model, &data, rng, |model| {
+            let pys: Vec<f64> = data.y.iter().map(|y| model.y_model.f(y)).collect();
 
-            *mds = new_mds;
-            Some(mds.clone())
-        })
-        .step_by(thinning)
-        .map(|mds| {
-            let pys: Vec<f64> = mds.y.iter().map(|y| mds.y_model.f(y)).collect();
-
-            mds.joints
+            data.joints
                 .iter()
-                .zip(mds.joint_models.iter())
+                .zip(model.joint_models.iter())
                 .map(|(xys, m)| {
                     assert_eq!(pys.len(), xys.len());
                     xys.iter()
@@ -160,8 +193,10 @@ where
                 })
                 .collect()
         })
-        .collect();
-    res
+        .skip(warmup)
+        .step_by(thinning.into())
+        .take(n)
+        .collect()
 }
 
 #[cfg(test)]
@@ -180,7 +215,7 @@ mod tests {
         };
         let mut rng = rand::rngs::SmallRng::seed_from_u64(0x1234);
 
-        let delta_is = deltas(f, 6, 1000, 100, 1, &mut rng);
+        let delta_is = deltas(f, 6, 1000, 10, NonZeroUsize::new(1).unwrap(), &mut rng);
 
         let n = delta_is.len();
 

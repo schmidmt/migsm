@@ -57,7 +57,7 @@ mod tests {
     use rv::traits::{ConjugatePrior, Rv, SuffStat};
 
     use crate::mcmc::samplers::partition::gibbs::PartitionModel;
-    use crate::mcmc::{GewekeTest, McmcSamplerIterable, PriorModel, ResampleModel, Sampler};
+    use crate::mcmc::{GewekeTest, PriorModel, ResampleModel, Sampler};
     use crate::models::mixture::ConjugateMixtureModel;
     use crate::utils::{convert_to_unicode, total_variation_distance};
 
@@ -133,6 +133,7 @@ mod tests {
                 empty_stat,
                 _phantom_x: std::marker::PhantomData,
                 _phantom_fx: std::marker::PhantomData,
+                component_weights: std::cell::OnceCell::new(),
             }
         }
     }
@@ -335,12 +336,6 @@ mod tests {
 
     #[test]
     fn density_estimate() {
-        /*
-        use itertools::Itertools;
-        use std::fs::File;
-        use std::io::Write;
-        */
-
         let mut rng = SmallRng::seed_from_u64(0x1234);
 
         let g1 = Gaussian::new_unchecked(-2.0, 1.0);
@@ -354,17 +349,7 @@ mod tests {
 
         data.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-        /*
-        let mut f_data = File::create("./data.csv").expect("Should be able to open file");
-        let mut f_density = File::create("./density.csv").expect("Should be able to open file");
-        let mut f_assign = File::create("./assign.csv").expect("Should be able to open file");
-
-        for datum in &data {
-            writeln!(f_data, "{datum}").expect("Should be able to write to file");
-        }
-        */
-
-        let model = ConjugateMixtureModel::new(
+        let model: ConjugateMixtureModel<f64, Gaussian, NormalGamma> = ConjugateMixtureModel::new(
             NormalGamma::new_unchecked(0.0, 1.0, 1.0, 1.0),
             data.iter(),
             1.0,
@@ -374,44 +359,15 @@ mod tests {
         let mut sampler = PartitionGibbs::new();
 
         let deltas = sampler
-            .iter_step(model, &data, 1, &mut rng)
-            .skip(0)
-            .take(1000)
-            .enumerate()
-            .map(|(_i, model)| {
-                /*
-                let d: Vec<f64> = xs.iter().map(|x| model.ln_f(x).exp()).collect();
-
-                writeln!(
-                    f_density,
-                    "{i:4},{}",
-                    d.iter()
-                        .map(ToString::to_string)
-                        .intersperse(String::from(","))
-                        .collect::<String>()
-                )
-                .expect("Should be able to write to file");
-
-                writeln!(
-                    f_assign,
-                    "{}",
-                    model
-                        .assignments
-                        .iter()
-                        .map(|a| a.map_or(String::from("-1"), |x| x.to_string()))
-                        .intersperse(String::from(","))
-                        .collect::<String>()
-                )
-                .expect("Should be able to write to file");
-                */
-
+            .iter_sample(model, &data, &mut rng, |model| {
                 total_variation_distance(
                     |x| 0.3 * g1.f(&x) + 0.7 * g2.f(&x),
                     |x| model.f(&x),
                     10,
                     (-10.0, 10.0),
                 )
-            });
+            })
+            .take(1000);
 
         let mean_delta = deltas.sum::<f64>() / 1000.0;
         assert!(mean_delta < 0.05);

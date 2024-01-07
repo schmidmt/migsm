@@ -43,4 +43,3 @@ where
         self.0(state)
     }
 }
-
