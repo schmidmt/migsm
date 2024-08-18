@@ -5,12 +5,6 @@ use serde::Serialize;
 
 pub mod samplers;
 
-pub struct Link<M> {
-    pub model: M,
-    pub log_likelihood: f64,
-    pub log_prior: f64,
-}
-
 /// Trait for Markov Chain Monte Carlo Samplers.
 pub trait Sampler<M, D>: Sized
 where
@@ -60,125 +54,6 @@ pub struct McmcSamplerStep<S> {
     pub ln_score: f64,
 }
 
-// Lensed Samplers
-/*
-/// Sampler for  value within a model, accessed via a lens and updated with the given sampler.
-pub struct LensedSampler<S, D, OuterModel, InnerModel, L>
-where
-    L: Lens<OuterModel, InnerModel>,
-    S: Sampler<InnerModel, D>,
-    OuterModel: Model<D>,
-    InnerModel: Model<D>,
-{
-    lens: L,
-    inner: S,
-    _phantom_outer_model: PhantomData<OuterModel>,
-    _phantom_inner_model: PhantomData<InnerModel>,
-    _phantom_d: PhantomData<D>,
-}
-
-impl<S, D, OuterModel, InnerModel, L> LensedSampler<S, D, OuterModel, InnerModel, L>
-where
-    L: Lens<OuterModel, InnerModel>,
-    S: Sampler<InnerModel, D>,
-    InnerModel: Model<D>,
-    OuterModel: Model<D>,
-{
-    pub fn new(lens: L, inner: S) -> Self {
-        Self {
-            lens,
-            inner,
-            _phantom_outer_model: PhantomData,
-            _phantom_inner_model: PhantomData,
-            _phantom_d: PhantomData,
-        }
-    }
-}
-
-impl<S, D, OuterModel, InnerModel, L> Sampler<OuterModel, D>
-    for LensedSampler<S, D, OuterModel, InnerModel, L>
-where
-    S: Sampler<InnerModel, D>,
-    L: Lens<OuterModel, InnerModel>,
-    InnerModel: Model<D> + Clone,
-    OuterModel: Model<D> + Clone,
-{
-    fn step<R: Rng>(&mut self, model: OuterModel, data: &D, rng: &mut R) -> OuterModel {
-        let x = self.lens.get(&model);
-        let new_x = self.inner.step(x.clone(), data, rng);
-        self.lens.set(model, new_x.clone())
-    }
-}
-
-pub trait Proposer {
-    type State;
-
-    fn propose<R: Rng + ?Sized>(&mut self, state: &Self::State, rng: &mut R) -> Self::State;
-}
-
-pub struct MetropolisProposalSampler<S, P, F>
-where
-    S: Model,
-    P: Proposer<State = S>,
-    F: Fn(&S) -> f64,
-{
-    proposer: P,
-    ln_score: F,
-    current_state: S,
-    current_ln_score: f64,
-}
-
-impl<S, P, F, R> McmcSampler<R> for MetropolisProposalSampler<S, P, F>
-where
-    S: Model,
-    P: Proposer<State = S>,
-    F: Fn(&S) -> f64,
-    R: Rng + ?Sized,
-{
-    type Model = S;
-
-    fn step(&mut self, rng: &mut R) {
-        let proposed_state = self.proposer.propose(&self.current_state, rng);
-        let proposed_ln_score = proposed_state.ln_score();
-        let ln_alpha = proposed_ln_score - self.current_ln_score;
-
-        if rng.gen::<f64>() < ln_alpha.exp() {
-            self.current_state = proposed_state;
-            self.current_ln_score = proposed_ln_score;
-        }
-    }
-}
-
-pub struct NestedSampler<M, D>
-where
-    M: Model<D>,
-{
-    samplers: Vec<Box<dyn Sampler<M, D>>>,
-}
-
-impl<M, D> NestedSampler<M, D>
-where
-    M: Model<D>,
-{
-    pub fn new<I: IntoIterator<Item = Box<dyn Sampler<M, D>>>>(samplers: I) -> Self {
-        Self {
-            samplers: samplers.into_iter().collect(),
-        }
-    }
-}
-
-impl<M, D> Sampler<M, D> for NestedSampler<M, D>
-where
-    M: Model<D>,
-{
-    fn step<R: Rng>(&mut self, model: M, data: &D, rng: &mut R) {
-        self.samplers
-            .iter_mut()
-            .fold(model, |sampler, x| sampler.step(x, rng))
-    }
-}
-*/
-
 #[derive(Clone, Debug, Default)]
 pub struct GewekeTestOptions<F> {
     pub thinning: usize,
@@ -206,7 +81,6 @@ where
         iterations: usize,
         rng: &mut R,
     ) -> Vec<(M, D)> {
-        //eprintln!("MCS!!!!!!!!!!!!!!\n\n");
         (0..iterations)
             .map(|_| {
                 let mut model = M::draw_from_prior(rng);
@@ -223,10 +97,8 @@ where
     ) -> Vec<(M, D)> {
         let mut init_model = M::draw_from_prior(rng);
         let init_data = init_model.resample_data(None, rng);
-        //eprintln!("__GEWEKE_SCS__");
         (0..iterations)
             .scan((init_model, init_data), |(model, data), _i| {
-                //eprintln!("__GEWEKE_SCS__ step i = {i}");
                 let new_data = model.resample_data(Some(data), rng);
                 let new_model = self.step(model.clone(), &new_data, rng);
                 *model = new_model.clone();

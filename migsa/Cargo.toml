@@ -1,5 +1,5 @@
 [package]
-name = "migsm"
+name = "migsa"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
@@ -9,11 +9,12 @@ license = "MIT"
 [dependencies]
 criterion-stats = "0.3.0"
 enum_dispatch = "0.3"
+itertools = "0.12.0"
 nalgebra = { version = "0.32", features = ["serde-serialize"] }
 once_cell = "1.17.0"
 rand = "0.8"
 rayon = "1.6.1"
-rv = { version = "0.16", features = ["arraydist", "serde"] }
+rv = { version = "0.16", features = ["arraydist", "serde"], path = "../../redpoll/rv" }
 serde = "1"
 serde_json = "1"
 tempfile = "3.6"
@@ -21,3 +22,6 @@ tempfile = "3.6"
 [dev-dependencies]
 assert = "0.7.4"
 itertools = "0.12.0"
+
+[profile.release]
+debug = true

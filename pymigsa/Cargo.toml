@@ -1,0 +1,17 @@
+[package]
+name = "pymigsa"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "migsa"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = "0.21"
+migsa = { path = "../migsa" }
+numpy = { version = "0.21", features = ["nalgebra"] }
+nalgebra = "0.32"
+rv = { version = "0.16", features = ["arraydist", "serde"], path = "../../redpoll/rv" }
+rand = "0.8.5"

@@ -158,7 +158,7 @@ where
         }
     }
 
-    /// Remove empty partitions and ensure partition indicies start from 0 and increment by one.
+    /// Remove empty partitions and ensure partition indices start from 0 and increment by one.
     pub fn compact(&mut self) {
         let to_simplify: Vec<usize> = self
             .counts
@@ -191,7 +191,7 @@ where
             .for_each(|i| *i -= 1);
     }
 
-    /// Resample the partion from a `CRP`
+    /// Resample the partition from a `CRP`
     pub fn resample_crp<R: Rng>(&mut self, crp: &Crp, rng: &mut R) {
         let mut crp_draw: rv::data::Partition = crp.draw(rng);
 
@@ -217,7 +217,7 @@ where
         Self::new(f, |stat, x| stat.observe(x), |stat, x| stat.forget(x))
     }
 
-    /// Log margninal likelihood.
+    /// Log marginal likelihood.
     pub fn ln_m<Fx, Pr>(&self, prior: &Pr) -> f64
     where
         Pr: ConjugatePrior<X, Fx>,
@@ -276,7 +276,7 @@ mod tests {
         let data: Vec<f64> = dist.sample(1000, &mut rng);
         let mut part: Partition<GaussianSuffStat, f64> =
             Partition::new_stat(move || empty_suffstat.clone());
-        part.append(data.into_iter());
+        part.append(data);
 
         for i in 0..1000 {
             part.assign(i, 0);

@@ -105,8 +105,7 @@ mod tests {
 
             // Draw assignments from CRP
             let partition = crp.draw(rng);
-            let assignments: Vec<Option<usize>> =
-                partition.z().into_iter().map(|x| Some(*x)).collect();
+            let assignments: Vec<Option<usize>> = partition.z().iter().map(|x| Some(*x)).collect();
 
             // Initialize stats
             let counts: Vec<usize> = partition.counts().clone();

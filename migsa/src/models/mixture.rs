@@ -2,7 +2,9 @@ use std::cell::OnceCell;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
+use nalgebra::DVector;
 use rand::{Rng, SeedableRng};
+use rv::dist::Mixture;
 use rv::misc::{logsumexp, pflip};
 use rv::prelude::{Crp, DataOrSuffStat};
 use rv::traits::{ConjugatePrior, HasSuffStat, Rv, SuffStat};
@@ -211,57 +213,140 @@ where
     }
 }
 
-impl<X, Fx, Pr> rv::traits::Rv<X> for ConjugateMixtureModel<X, Fx, Pr>
+/*
+impl<X, Y, Fx, Pr> ConjugateMixtureModel<X, Fx, Pr>
 where
     X: Clone,
-    Fx: Rv<X> + HasSuffStat<X>,
+    Fx: Rv<X> + HasSuffStat<X> + MultivariateRv<X, Y>,
     Pr: ConjugatePrior<X, Fx>,
     Fx::Stat: Clone + Debug,
 {
-    fn ln_f(&self, x: &X) -> f64 {
+    pub fn marginal_ln_f(&self, y: &Y) -> f64 {
         // The ln poster predictive probabilities for each component
-        let component_posterior_ln_ps: Vec<f64> = self
+        let component_posterior_ln_ps = self
             .partition_stats
             .iter()
             .map(|stat| self.prior.ln_pp(x, &DataOrSuffStat::SuffStat(stat)))
             .chain(std::iter::once(
                 self.prior
                     .ln_pp(x, &DataOrSuffStat::SuffStat(&self.empty_stat)),
-            ))
-            .collect();
-
-        // TODO: Add empty component weight and empty posterior predictive
+            ));
 
         // Component weights
         let weights: &[f64] = self.component_weights();
 
         let ln_ps: Vec<f64> = weights
-            .into_iter()
-            .zip(component_posterior_ln_ps.into_iter())
+            .iter()
+            .zip(component_posterior_ln_ps)
             .map(|(w, component_ln_pp)| w.ln() + component_ln_pp)
             .collect();
 
         logsumexp(&ln_ps)
     }
+}
+*/
 
-    fn draw<R: Rng>(&self, rng: &mut R) -> X {
-        let weights: &[f64] = self.component_weights();
-        let component_idx = pflip(&weights, 1, rng)[0];
+impl<X, Fx, Pr> rv::traits::Rv<Mixture<Fx>> for ConjugateMixtureModel<X, Fx, Pr>
+where
+    X: Clone,
+    Fx: Rv<X> + HasSuffStat<X>,
+    Pr: ConjugatePrior<X, Fx>,
+    Fx::Stat: Clone + Debug,
+{
+    fn ln_f(&self, x: &Mixture<Fx>) -> f64 {
+        todo!()
+    }
 
-        if component_idx < self.partition_stats.len() {
-            // Draw from an existing component
-            self.prior
-                .posterior(&DataOrSuffStat::SuffStat(
-                    &self.partition_stats[component_idx],
-                ))
-                .draw(rng)
-                .draw(rng)
-        } else {
-            // Draw from a new component
-            self.prior.draw(rng).draw(rng)
-        }
+    fn draw<R: Rng>(&self, rng: &mut R) -> Mixture<Fx> {
+        let weights: Vec<f64> = self.component_weights().to_vec();
+
+        let components = self
+            .partition_stats
+            .iter()
+            .chain(std::iter::once(&self.empty_stat))
+            .map(|s| self.prior.posterior(&DataOrSuffStat::SuffStat(s)).draw(rng))
+            .collect();
+
+        Mixture::new_unchecked(weights, components)
     }
 }
+
+impl<Fx, Pr> rv::traits::Rv<DVector<f64>> for ConjugateMixtureModel<DVector<f64>, Fx, Pr>
+where
+    Fx: Rv<DVector<f64>> + HasSuffStat<DVector<f64>>,
+    Pr: ConjugatePrior<DVector<f64>, Fx>,
+    Fx::Stat: Clone + Debug,
+{
+    fn ln_f(&self, x: &DVector<f64>) -> f64 {
+        self.partition_stats
+            .iter()
+            .zip(self.component_weights.get().unwrap().iter())
+            .chain(std::iter::once((&self.empty_stat, &self.crp.alpha())))
+            .map(|(stat, weight)| {
+                self.prior.ln_pp(x, &DataOrSuffStat::SuffStat(stat)) + weight.ln()
+            })
+            .sum()
+    }
+
+    fn draw<R: Rng>(&self, rng: &mut R) -> DVector<f64> {
+        todo!()
+    }
+}
+
+macro_rules! cmm_float {
+    ($kind: ty) => {
+        impl<Fx, Pr> rv::traits::Rv<$kind> for ConjugateMixtureModel<$kind, Fx, Pr>
+        where
+            Fx: Rv<$kind> + HasSuffStat<$kind>,
+            Pr: ConjugatePrior<$kind, Fx>,
+            Fx::Stat: Clone + Debug,
+        {
+            fn ln_f(&self, x: &$kind) -> f64 {
+                // The ln poster predictive probabilities for each component
+                let component_posterior_ln_ps = self
+                    .partition_stats
+                    .iter()
+                    .map(|stat| self.prior.ln_pp(x, &DataOrSuffStat::SuffStat(stat)))
+                    .chain(std::iter::once(
+                        self.prior
+                            .ln_pp(x, &DataOrSuffStat::SuffStat(&self.empty_stat)),
+                    ));
+
+                // Component weights
+                let weights: &[f64] = self.component_weights();
+
+                let ln_ps: Vec<f64> = weights
+                    .iter()
+                    .zip(component_posterior_ln_ps)
+                    .map(|(w, component_ln_pp)| w.ln() + component_ln_pp)
+                    .collect();
+
+                logsumexp(&ln_ps)
+            }
+
+            fn draw<R: Rng>(&self, rng: &mut R) -> $kind {
+                let weights: &[f64] = self.component_weights();
+                let component_idx = pflip(weights, 1, rng)[0];
+
+                if component_idx < self.partition_stats.len() {
+                    // Draw from an existing component
+                    self.prior
+                        .posterior(&DataOrSuffStat::SuffStat(
+                            &self.partition_stats[component_idx],
+                        ))
+                        .draw(rng)
+                        .draw(rng)
+                } else {
+                    // Draw from a new component
+                    self.prior.draw(rng).draw(rng)
+                }
+            }
+        }
+    };
+}
+
+cmm_float!(f64);
+cmm_float!(f32);
 
 impl<X, Fx, Pr, D> Model<D> for ConjugateMixtureModel<X, Fx, Pr>
 where
@@ -575,12 +660,13 @@ mod tests {
             4.2749019,
         ];
 
-        let mm = ConjugateMixtureModel::new(
-            NormalGamma::new_unchecked(0.0, 1.0, 1.0, 1.0),
-            data.iter(),
-            1.0,
-            &mut rng,
-        );
+        let mm: ConjugateMixtureModel<f64, rv::prelude::Gaussian, NormalGamma> =
+            ConjugateMixtureModel::new(
+                NormalGamma::new_unchecked(0.0, 1.0, 1.0, 1.0),
+                data.iter(),
+                1.0,
+                &mut rng,
+            );
 
         let xs: Vec<f64> = linspace(-100.0, 100.0, 10_000);
 

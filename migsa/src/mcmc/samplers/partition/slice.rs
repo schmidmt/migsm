@@ -1,5 +1,5 @@
 use rand::Rng;
-use rv::prelude::{Beta, BetaError, Uniform};
+use rv::prelude::{Beta, BetaError};
 use rv::traits::Rv;
 
 use crate::mcmc::Sampler;
@@ -12,7 +12,7 @@ impl<M, D> Sampler<M, D> for Slice
 where
     M: Model<D>,
 {
-    fn step<R: rand::Rng>(&mut self, model: M, data: &D, rng: &mut R) -> M {
+    fn step<R: rand::Rng>(&mut self, _model: M, _data: &D, _rng: &mut R) -> M {
         todo!()
     }
 }
@@ -30,12 +30,14 @@ impl<'a, R> StickBreakingProcess<'a, R>
 where
     R: Rng,
 {
+    #[allow(unused)]
     pub fn truncated(self, n: usize) -> Vec<f64> {
         self.take(n).collect()
     }
 }
 
 impl<'a, R: Rng> StickBreakingProcess<'a, R> {
+    #[allow(unused)]
     pub fn new(alpha: f64, rng: &'a mut R) -> Result<Self, BetaError> {
         Ok(Self {
             beta: Beta::new(alpha, 1.0)?,
@@ -54,7 +56,7 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         let nu: f64 = self.beta.draw(self.rng);
 
-        let beta = nu * self.remaining;
+        let _beta = nu * self.remaining;
         self.remaining *= 1.0 - nu;
         Some(nu)
     }

@@ -1,17 +1,27 @@
 use std::fmt::Debug;
 
+use itertools::Itertools;
+
 use crate::mcmc::{Model, Sampler};
 use crate::models::partition::PartitionModel;
 
 /// Split-Merge Sampler
 ///
 /// Reference: https://doi.org/10.1198/1061860043001
+#[derive(Clone, Copy, Debug, Default)]
 pub struct SplitMergeSampler {}
 
 impl SplitMergeSampler {
     pub fn new() -> Self {
-        Self {}
+        Self::default()
     }
+}
+
+fn assignment_string(assn: &[Option<usize>]) -> String {
+    assn.iter()
+        .map(|x| x.map_or_else(|| "X".to_string(), |x| x.to_string()))
+        .intersperse(",".to_string())
+        .collect::<String>()
 }
 
 impl<M, D, X> Sampler<M, D> for SplitMergeSampler
@@ -20,6 +30,8 @@ where
     D: std::ops::Index<usize, Output = X>,
 {
     fn step<R: rand::Rng>(&mut self, model: M, data: &D, rng: &mut R) -> M {
+        dbg!(assignment_string(model.assignments()));
+
         // choose two distinct points from the data
         let i = rng.gen_range(0..(model.n_data()));
         let j = {
@@ -31,9 +43,13 @@ where
             }
         };
 
+        dbg!((&i, &j));
+
         // get the assignments for each point
         let c_j = model.assignments()[j].expect("should be set");
         let c_i = model.assignments()[i].expect("should be set");
+
+        dbg!((&c_i, &c_j));
 
         let to_assign = model
             .assignments()
@@ -41,7 +57,7 @@ where
             .enumerate()
             .filter_map(|(k, assgn)| {
                 if let Some(c_k) = assgn {
-                    (*c_k == c_j || *c_k == c_i).then(|| k)
+                    (*c_k == c_j || *c_k == c_i).then_some(k)
                 } else {
                     None
                 }
@@ -60,7 +76,7 @@ where
                 rand::distributions::Slice::new(&assignment_options).expect("should be valid");
 
             to_assign.for_each(|k| {
-                let new_partition = rng.sample(&split_assignment_dist);
+                let new_partition = rng.sample(split_assignment_dist);
                 proposed_model.assign(k, *new_partition, data);
             })
         } else {
@@ -70,14 +86,16 @@ where
             });
         }
 
+        dbg!(assignment_string(proposed_model.assignments()));
+
         // Generate a MH acceptance uniformly on [0, 1)
         let alpha_threshold: f64 = rng.gen();
 
         // Perform a Metropolis-Hastings accept-reject
-        let log_alpha = proposed_model.ln_score(data) - model.ln_score(data);
+        let log_alpha = dbg!(proposed_model.ln_score(data)) - dbg!(model.ln_score(data));
         let alpha = log_alpha.exp();
 
-        if alpha_threshold < alpha {
+        if alpha_threshold < dbg!(alpha) {
             proposed_model
         } else {
             model
@@ -106,8 +124,8 @@ mod test {
         let g1 = Gaussian::new_unchecked(-200.0, 1.0);
         let g2 = Gaussian::new_unchecked(200.0, 1.0);
 
-        let mut data: Vec<f64> = g1.sample(10, &mut rng);
-        data.append(&mut g2.sample(10, &mut rng));
+        let mut data: Vec<f64> = g1.sample(20, &mut rng);
+        data.append(&mut g2.sample(20, &mut rng));
 
         let model = ConjugateMixtureModel::new(
             NormalGamma::new_unchecked(0.0, 1.0, 1.0, 1.0),
@@ -119,7 +137,7 @@ mod test {
         let mut sampler = SplitMergeSampler::new();
         let assoc_mat: Vec<Vec<f64>> = vec![vec![0.0; data.len()]; data.len()];
 
-        let n_samples: usize = 1_000_000;
+        let n_samples: usize = 1_000;
 
         let (model, assoc) = (0..n_samples).fold((model, assoc_mat), |(m, mut a), _i| {
             let next_model = sampler.step(m, &data, &mut rng);
