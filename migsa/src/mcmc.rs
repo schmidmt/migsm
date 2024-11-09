@@ -18,6 +18,20 @@ where
         (0..steps).fold(model, |acc, _| self.step(acc, data, rng))
     }
 
+    fn iter<'a, R: Rng>(
+        &'a mut self,
+        model: M,
+        data: &'a D,
+        rng: &'a mut R,
+    ) -> SamplerIter<'a, M, D, Self, R> {
+        SamplerIter {
+            sampler: self,
+            model: Some(model),
+            data,
+            rng,
+        }
+    }
+
     fn iter_sample<'a, T, F: Fn(&M) -> T + 'a, R: Rng>(
         &mut self,
         model: M,
@@ -30,6 +44,35 @@ where
 
             Some(f(model))
         })
+    }
+}
+
+pub struct SamplerIter<'a, M, D, S, R>
+where
+    S: Sampler<M, D>,
+    M: Model<D>,
+    R: Rng,
+{
+    sampler: &'a mut S,
+    model: Option<M>,
+    data: &'a D,
+    rng: &'a mut R,
+}
+
+impl<'a, M, D, S, R> Iterator for SamplerIter<'a, M, D, S, R>
+where
+    S: Sampler<M, D>,
+    M: Model<D> + Clone + 'a,
+    R: Rng,
+{
+    type Item = M;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let model = self.model.take().expect("Ought to have a value here");
+        let model = self.sampler.step(model, self.data, self.rng);
+        self.model = Some(model);
+        // TODO: This is terribly slow... maybe look at streaming iterators.
+        self.model.clone()
     }
 }
 

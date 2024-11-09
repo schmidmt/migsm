@@ -24,7 +24,7 @@ use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use rv::dist::{Mixture, MvGaussian};
 use rv::prelude::NormalInvWishart;
-use rv::traits::{Mean, MultivariateRv, Rv};
+use rv::traits::{MultivariateRv, Rv};
 
 use crate::mcmc::samplers::partition::gibbs::PartitionGibbs;
 use crate::mcmc::Sampler;
@@ -98,10 +98,12 @@ pub fn single_loop_deltas<F, G, R>(
     parameter_dist: G,
     f: F,
     n_evals: usize,
-    n: usize,
+    n_mcmc_iters: usize,
+    n_mc_delta_iters: usize,
     warmup: usize,
     thinning: NonZeroUsize,
     rng: &mut R,
+    alpha: f64,
 ) -> Vec<Vec<f64>>
 where
     G: MultivariateRv<DVector<f64>, f64>,
@@ -111,13 +113,40 @@ where
 {
     let xs = parameter_dist.sample(n_evals, rng);
     let y: Vec<f64> = xs.iter().map(|x| f(x)).collect();
-    let n_params = parameter_dist.dimensions();
+
+    single_loop_deltas_from_outputs(
+        xs,
+        y,
+        n_mcmc_iters,
+        n_mc_delta_iters,
+        warmup,
+        thinning,
+        rng,
+        alpha,
+    )
+}
+
+pub fn single_loop_deltas_from_outputs<R>(
+    parameters: Vec<DVector<f64>>,
+    responses: Vec<f64>,
+    n_mcmc_iters: usize,
+    n_mc_delta_iters: usize,
+    warmup: usize,
+    thinning: NonZeroUsize,
+    rng: &mut R,
+    alpha: f64,
+) -> Vec<Vec<f64>>
+where
+    R: Rng,
+{
+    let n_params = parameters.first().expect("At least one input").len();
 
     // A n_params x n x n
     let joints: Vec<Vec<DVector<f64>>> = (0..n_params)
         .map(|p| {
-            xs.iter()
-                .zip(y.iter())
+            parameters
+                .iter()
+                .zip(responses.iter())
                 .map(|(x, y)| dvector![x[p], *y])
                 .collect()
         })
@@ -134,7 +163,7 @@ where
                     NormalInvWishart::new(DVector::zeros(2), 1.0, 2, DMatrix::identity(2, 2))
                         .expect("Should be valid"),
                     xy.iter(),
-                    1.0,
+                    alpha,
                     rng,
                 )
             })
@@ -150,40 +179,23 @@ where
 
     // TODO: Don't actually do the delta calculations before warmup and thinning.
     sampler
-        .iter_sample(model, &data, rng, |model| {
+        .iter(model, &data, rng)
+        .skip(warmup)
+        .step_by(thinning.into())
+        .take(n_mcmc_iters)
+        .map(|model| {
             model
                 .joint_models
                 .iter()
                 .map(|jmodel| {
                     let mut rng = SmallRng::from_entropy();
                     let mixture: Mixture<MvGaussian> = jmodel.draw(&mut rng);
-                    //let mixture_mean: DVector<f64> = mixture
-                    //    .weights()
-                    //    .iter()
-                    //    .zip(mixture.components().iter())
-                    //    .map(|(&w, c)| c.mean().unwrap() * w)
-                    //    .sum();
-
                     let mixture_y = mixture.marginal(1).unwrap();
                     let mixture_x = mixture.marginal(0).unwrap();
-                    // let scale_x = mixture
-                    //     .weights()
-                    //     .iter()
-                    //     .zip(mixture.components().iter())
-                    //     .map(|(&w, c)| c.cov().get((0, 0)).unwrap() * w)
-                    //     .sum::<f64>();
-                    // let scale_y = mixture
-                    //     .weights()
-                    //     .iter()
-                    //     .zip(mixture.components().iter())
-                    //     .map(|(&w, c)| c.cov().get((1, 1)).unwrap() * w)
-                    //     .sum::<f64>();
 
                     // Monte Carlo integration
-                    //mixture.sample_stream(&mut rng)
-
-                    let xys: Vec<DVector<f64>> = mixture.sample(3_000, &mut rng);
-                    xys.iter()
+                    mixture
+                        .sample_stream(&mut rng)
                         .map(|xy| {
                             let ln_f_x = mixture_x.ln_f(&xy[0]);
                             let ln_f_y = mixture_y.ln_f(&xy[1]);
@@ -191,31 +203,63 @@ where
 
                             ((ln_f_y + ln_f_x - ln_f_xy).exp() - 1.0).abs() / 2.0
                         })
-                        .sum::<f64>()
-                        / (xys.len() as f64)
-
-                    // Quadrature Version
-                    // let delta_fn = |mut x, mut y| {
-                    //     x = x * scale_x + mixture_mean[0];
-                    //     y = y * scale_y + mixture_mean[1];
-
-                    //     let ln_f_x = mixture_x.ln_f(&x);
-                    //     let ln_f_y = mixture_y.ln_f(&y);
-                    //     let ln_f_xy = mixture.ln_f(&dvector![x, y]);
-
-                    //     ((ln_f_y + ln_f_x - ln_f_xy).exp() - 1.0).abs() / 2.0 * ln_f_xy.exp()
-                    // };
-
-                    // dblquad(delta_fn, (-5.0, 5.0), (-5.0, 5.0), 1000, 1000)
+                        .take(n_mc_delta_iters)
+                        .fold(WelfordState::default(), |acc, x| acc.update(x))
+                        .mean()
                 })
                 .collect()
         })
-        .skip(warmup)
-        .step_by(thinning.into())
-        //.filter(|deltas: &Vec<f64>| deltas.iter().all(|&d| d <= 1.0))
-        .take(n)
         .collect()
 }
+
+#[derive(Default)]
+struct WelfordState {
+    count: usize,
+    mean: f64,
+    m2: f64,
+}
+
+impl WelfordState {
+    fn update(self, new_value: f64) -> Self {
+        let count = self.count + 1;
+        let delta = new_value - self.mean;
+        let mean = self.mean + delta / (count as f64);
+        let delta2 = new_value - mean;
+        let m2 = self.m2 + delta * delta2;
+
+        Self { count, mean, m2 }
+    }
+
+    fn mean(&self) -> f64 {
+        self.mean
+    }
+
+    fn sample_variance(&self) -> f64 {
+        self.m2 / ((self.count + 1) as f64)
+    }
+}
+
+trait McMean: Iterator<Item = f64> + Sized {
+    fn mean(self, tol: f64) -> Option<f64> {
+        let mut stat = WelfordState::default();
+
+        for (n, next) in self.enumerate() {
+            stat = stat.update(next);
+
+            if n > 2 {
+                let sigma_q = (stat.sample_variance() / (n as f64)).sqrt();
+
+                if sigma_q < tol {
+                    return Some(stat.mean());
+                }
+            }
+        }
+
+        None
+    }
+}
+
+impl<I> McMean for I where I: Iterator<Item = f64> {}
 
 pub fn dblquad<F>(f: F, x_bounds: (f64, f64), y_bounds: (f64, f64), nx: usize, ny: usize) -> f64
 where
