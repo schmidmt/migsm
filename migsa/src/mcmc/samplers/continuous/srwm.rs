@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 
 use rand::Rng;
 use rv::prelude::Gaussian;
-use rv::traits::Rv;
+use rv::traits::Sampleable;
 
 use crate::mcmc::{Model, Sampler};
 use crate::Lens;
@@ -22,7 +22,7 @@ impl<X, M, L> SRWM<X, M, L>
 where
     L: Lens<M, X>,
 {
-    pub fn new(proposal_dist: Gaussian, lens: L) -> Self {
+    pub const fn new(proposal_dist: Gaussian, lens: L) -> Self {
         Self {
             lens,
             proposal_dist,
@@ -47,7 +47,7 @@ where
         let log_accpt = new_ln_f - orig_ln_f;
         let accpt = log_accpt.exp();
 
-        if rng.gen::<f64>() < accpt {
+        if rng.random::<f64>() < accpt {
             proposed_model
         } else {
             model
@@ -75,8 +75,9 @@ mod tests {
             fn get(&self) -> &f64 {
                 &self.mean
             }
+            #[allow(clippy::needless_update)]
             fn set(self, mean: f64) -> Self {
-                Self { mean }
+                Self { mean, ..self }
             }
         }
 
@@ -118,6 +119,7 @@ mod tests {
                     GaussainUnknownMean,
                     Vec<f64>,
                 )| {
+                    #[allow(clippy::cast_precision_loss)]
                     let n = data.len() as f64;
                     vec![mean, (data.into_iter().sum::<f64>() / n)]
                 },

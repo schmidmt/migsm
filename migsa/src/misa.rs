@@ -19,17 +19,18 @@
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 
-use nalgebra::{dvector, DMatrix, DVector};
+use nalgebra::{DMatrix, DVector, dvector};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use rv::dist::{Mixture, MvGaussian};
+use rv::dist::{Crp, Mixture, MvGaussian};
 use rv::prelude::NormalInvWishart;
-use rv::traits::{MultivariateRv, Rv};
+use rv::traits::{HasDensity, Sampleable};
 
-use crate::mcmc::samplers::partition::gibbs::PartitionGibbs;
 use crate::mcmc::Sampler;
-use crate::models::mixture::ConjugateMixtureModel;
+use crate::mcmc::samplers::partition::gibbs::PartitionGibbs;
 use crate::models::Model;
+use crate::models::mixture::ConjugateMixtureModel;
+use crate::utils::{MeanAndVariance, Multivariate};
 
 #[derive(Debug, Clone)]
 struct InnerModels<D, M>
@@ -95,7 +96,7 @@ where
 }
 
 pub fn single_loop_deltas<F, G, R>(
-    parameter_dist: G,
+    parameter_dist: &G,
     f: F,
     n_evals: usize,
     n_mcmc_iters: usize,
@@ -106,17 +107,16 @@ pub fn single_loop_deltas<F, G, R>(
     alpha: f64,
 ) -> Vec<Vec<f64>>
 where
-    G: MultivariateRv<DVector<f64>, f64>,
-    G::Atom: std::fmt::Debug,
+    G: Sampleable<DVector<f64>>,
     F: Fn(&DVector<f64>) -> f64,
     R: Rng,
 {
     let xs = parameter_dist.sample(n_evals, rng);
-    let y: Vec<f64> = xs.iter().map(|x| f(x)).collect();
+    let y: Vec<f64> = xs.iter().map(f).collect();
 
     single_loop_deltas_from_outputs(
-        xs,
-        y,
+        &xs,
+        &y,
         n_mcmc_iters,
         n_mc_delta_iters,
         warmup,
@@ -126,9 +126,24 @@ where
     )
 }
 
+/// Calculate the single loop deltas sensitivities
+///
+/// # Parameters
+/// - `parameters`: Parameter sample.
+/// - `responses`: model responses under parameter sample.
+/// - `n_mcmc_iters`: Number of MCMC iterations for DPMM.
+/// - `n_mc_delta_iters`: Number of samples from mixture distribition to estimate the delta
+///   parameters.
+/// - `warmup`: MCMC warmup iterations to discard.
+/// - `thinning`: MCMC thinning to decorrelate samples.
+/// - `rng`: The RNG source
+/// - `alpha`: the Dirichlet concentration parameter.
+///
+/// # Panics
+/// This function will panic if the number of parameter samples is zero.
 pub fn single_loop_deltas_from_outputs<R>(
-    parameters: Vec<DVector<f64>>,
-    responses: Vec<f64>,
+    parameters: &[DVector<f64>],
+    responses: &[f64],
     n_mcmc_iters: usize,
     n_mc_delta_iters: usize,
     warmup: usize,
@@ -163,7 +178,7 @@ where
                     NormalInvWishart::new(DVector::zeros(2), 1.0, 2, DMatrix::identity(2, 2))
                         .expect("Should be valid"),
                     xy.iter(),
-                    alpha,
+                    Crp::new_unchecked(alpha, xy.len()),
                     rng,
                 )
             })
@@ -188,10 +203,11 @@ where
                 .joint_models
                 .iter()
                 .map(|jmodel| {
-                    let mut rng = SmallRng::from_entropy();
+                    let mut rng = SmallRng::from_os_rng();
                     let mixture: Mixture<MvGaussian> = jmodel.draw(&mut rng);
-                    let mixture_y = mixture.marginal(1).unwrap();
-                    let mixture_x = mixture.marginal(0).unwrap();
+                    let marginals = mixture.univariate_marginals();
+                    let mixture_x = &marginals[0];
+                    let mixture_y = &marginals[1];
 
                     // Monte Carlo integration
                     mixture
@@ -199,12 +215,15 @@ where
                         .map(|xy| {
                             let ln_f_x = mixture_x.ln_f(&xy[0]);
                             let ln_f_y = mixture_y.ln_f(&xy[1]);
-                            let ln_f_xy = mixture.ln_f(&xy);
+                            let ln_f_joint = mixture.ln_f(&xy);
 
-                            ((ln_f_y + ln_f_x - ln_f_xy).exp() - 1.0).abs() / 2.0
+                            (ln_f_y + ln_f_x - ln_f_joint).exp_m1().abs() / 2.0
                         })
                         .take(n_mc_delta_iters)
-                        .fold(WelfordState::default(), |acc, x| acc.update(x))
+                        .fold(
+                            MeanAndVariance::<f64>::default(),
+                            MeanAndVariance::<f64>::update,
+                        )
                         .mean()
                 })
                 .collect()
@@ -212,81 +231,33 @@ where
         .collect()
 }
 
-#[derive(Default)]
-struct WelfordState {
-    count: usize,
-    mean: f64,
-    m2: f64,
-}
-
-impl WelfordState {
-    fn update(self, new_value: f64) -> Self {
-        let count = self.count + 1;
-        let delta = new_value - self.mean;
-        let mean = self.mean + delta / (count as f64);
-        let delta2 = new_value - mean;
-        let m2 = self.m2 + delta * delta2;
-
-        Self { count, mean, m2 }
-    }
-
-    fn mean(&self) -> f64 {
-        self.mean
-    }
-
-    fn sample_variance(&self) -> f64 {
-        self.m2 / ((self.count + 1) as f64)
-    }
-}
-
-trait McMean: Iterator<Item = f64> + Sized {
-    fn mean(self, tol: f64) -> Option<f64> {
-        let mut stat = WelfordState::default();
-
-        for (n, next) in self.enumerate() {
-            stat = stat.update(next);
-
-            if n > 2 {
-                let sigma_q = (stat.sample_variance() / (n as f64)).sqrt();
-
-                if sigma_q < tol {
-                    return Some(stat.mean());
-                }
-            }
-        }
-
-        None
-    }
-}
-
-impl<I> McMean for I where I: Iterator<Item = f64> {}
-
+#[allow(clippy::cast_precision_loss)]
 pub fn dblquad<F>(f: F, x_bounds: (f64, f64), y_bounds: (f64, f64), nx: usize, ny: usize) -> f64
 where
     F: Fn(f64, f64) -> f64,
 {
-    let (a, b) = x_bounds;
-    let (c, d) = y_bounds;
+    let (x_left, x_right) = x_bounds;
+    let (y_left, y_right) = y_bounds;
 
-    let dx = (b - a) / (nx as f64);
-    let dy = (d - c) / (ny as f64);
+    let dx = (x_right - x_left) / (nx as f64);
+    let dy = (y_right - y_left) / (ny as f64);
 
-    let mut int = f(a, c) + f(b, c) + f(a, d) + f(b, d);
+    let mut int = f(x_left, y_left) + f(x_right, y_left) + f(x_left, y_right) + f(x_right, y_right);
 
     for i in 0..nx {
-        let xi = a + dx * ((i + 1) as f64);
-        int += 2.0 * f(xi, c) + 2.0 * f(xi, d);
+        let xi = dx.mul_add((i + 1) as f64, x_left);
+        int += 2.0f64.mul_add(f(xi, y_left), 2.0 * f(xi, y_right));
     }
 
     for j in 0..ny {
-        let yj = c + dy * ((j + 1) as f64);
-        int += 2.0 * f(a, yj) + 2.0 * f(b, yj);
+        let yj = dy.mul_add((j + 1) as f64, y_left);
+        int += 2.0f64.mul_add(f(x_left, yj), 2.0 * f(x_right, yj));
     }
 
     for i in 0..nx {
-        let xi = a + dx * ((i + 1) as f64);
+        let xi = dx.mul_add((i + 1) as f64, x_left);
         for j in 0..ny {
-            let yj = c + dy * ((j + 1) as f64);
+            let yj = dy.mul_add((j + 1) as f64, y_left);
             int += 4.0 * f(xi, yj);
         }
     }
@@ -295,8 +266,9 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_precision_loss)]
 mod tests {
-    use nalgebra::{dmatrix, dvector, DVector};
+    use nalgebra::{DVector, dmatrix, dvector};
     use rand::SeedableRng;
     use rv::dist::MvGaussian;
 
@@ -305,17 +277,19 @@ mod tests {
     #[test]
     fn wei_example_1() {
         let w = dvector![1.5, 1.6, 1.7, 1.8, 1.9, 2.0];
-        let f = |x: &DVector<f64>| -> f64 { w.dot(&x) };
+        let f = |x: &DVector<f64>| -> f64 { w.dot(x) };
         let mut rng = rand::rngs::SmallRng::seed_from_u64(0x1234);
 
         let delta_is = single_loop_deltas(
-            MvGaussian::new_unchecked(DVector::zeros(6), DMatrix::identity(6, 6)),
+            &MvGaussian::new_unchecked(DVector::zeros(6), DMatrix::identity(6, 6)),
             f,
             1_000,
             1_000,
+            1_000,
             15,
-            NonZeroUsize::new(1).unwrap(),
+            NonZeroUsize::new(1).expect("1 is not zero"),
             &mut rng,
+            10.0,
         );
 
         let n = delta_is.len();
@@ -331,7 +305,7 @@ mod tests {
             *mean /= n as f64;
         }
 
-        println!("deltas = {:#?}", means);
+        println!("deltas = {means:#?}");
         assert::close(&means, &[0.119, 0.129, 0.138, 0.148, 0.158, 0.168], 1E-2);
     }
 
@@ -352,8 +326,9 @@ mod tests {
         let cv: f64 = 0.08;
         let stds = cv * &means;
         let cov = DMatrix::from_diagonal(&stds) * rho * DMatrix::from_diagonal(&stds);
-        let parameter_dist = MvGaussian::new(means, cov).unwrap();
+        let parameter_dist = MvGaussian::new_unchecked(means, cov);
 
+        #[allow(clippy::many_single_char_names, clippy::items_after_statements)]
         fn d(p: &DVector<f64>) -> f64 {
             let x = p[0];
             let y = p[1];
@@ -362,22 +337,23 @@ mod tests {
             let t = p[4];
             let l = p[5];
 
-            (4.0 * l.powi(3) / (e * w * t))
-                * ((x / w.powi(2)).powi(2) + (y / t.powi(2)).powi(2)).sqrt()
+            (4.0 * l.powi(3) / (e * w * t)) * (x / w.powi(2)).hypot(y / t.powi(2))
         }
 
         let delta_is = single_loop_deltas(
-            parameter_dist,
+            &parameter_dist,
             d,
             1_000,
             1_000,
+            1_000,
             2_000,
-            NonZeroUsize::new(10).unwrap(),
+            NonZeroUsize::new(10).expect("10 is not zero"),
             &mut rng,
+            10.0,
         );
 
-        let f = std::fs::File::create("./deltas.json").unwrap();
-        serde_json::to_writer(f, &delta_is).unwrap();
+        let f = std::fs::File::create("./deltas.json").expect("to read file");
+        serde_json::to_writer(f, &delta_is).expect("to write file");
 
         let n = delta_is.len();
 
@@ -392,7 +368,7 @@ mod tests {
             *mean /= n as f64;
         }
 
-        println!("deltas = {:#?}", means);
+        println!("deltas = {means:#?}");
         assert::close(&means, &[0.056, 0.030, 0.081, 0.179, 0.146, 0.235], 1E-2);
     }
 

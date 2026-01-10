@@ -11,7 +11,7 @@ use pyo3::{prelude::*, Bound};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rv::dist::{Gaussian, Mixture, NormalGamma};
-use rv::traits::Rv;
+use rv::traits::{HasDensity, Sampleable};
 
 #[pyclass]
 #[derive(Debug)]
@@ -28,8 +28,8 @@ impl Igmm {
     #[pyo3(signature = (data, alpha = 1.0, seed = None))]
     fn new(data: Vec<f64>, alpha: f64, seed: Option<u64>) -> Self {
         let mut rng = seed.map_or_else(
-            || rand::rngs::SmallRng::from_entropy(),
-            |s| rand::rngs::SmallRng::seed_from_u64(s),
+            rand::rngs::SmallRng::from_os_rng,
+            rand::rngs::SmallRng::seed_from_u64,
         );
         Self {
             mixture_model: Some(ConjugateMixtureModel::new(
@@ -46,7 +46,9 @@ impl Igmm {
 
     fn step(&mut self) -> GaussianMixture {
         let next_model = self.sampler.step(
-            self.mixture_model.take().unwrap(),
+            self.mixture_model
+                .take()
+                .expect("by design, this should be present"),
             &self.data,
             &mut self.rng,
         );
@@ -162,27 +164,24 @@ fn single_loop_deltas<'a>(
         ))
     })?;
 
-    let mut rng = seed.map_or_else(
-        || StdRng::from_entropy(),
-        |seed| {
-            let bytes = seed.as_bytes();
+    let mut rng = seed.map_or_else(StdRng::from_os_rng, |seed| {
+        let bytes = seed.as_bytes();
 
-            let mut seed: [u8; 32] = [0; 32];
-            let n = std::cmp::min(seed.len(), bytes.len());
-            seed[0..n].copy_from_slice(&bytes[0..n]);
-            StdRng::from_seed(seed)
-        },
-    );
+        let mut seed: [u8; 32] = [0; 32];
+        let n = std::cmp::min(seed.len(), bytes.len());
+        seed[0..n].copy_from_slice(&bytes[0..n]);
+        StdRng::from_seed(seed)
+    });
 
     let f = |x: &DVector<f64>| -> f64 {
-        func.call1((x.to_pyarray_bound(py),))
-            .unwrap()
+        func.call1((x.to_pyarray(py),))
+            .expect("the function should not raise an exception")
             .extract()
-            .unwrap()
+            .expect("the value should be castable to a f64")
     };
 
     let deltas = ::migsa::misa::single_loop_deltas(
-        parameter_dist,
+        &parameter_dist,
         f,
         n_evals,
         n_mcmc_iters,
@@ -193,14 +192,19 @@ fn single_loop_deltas<'a>(
         alpha,
     );
 
-    let m = deltas.first().unwrap().len();
+    let m = deltas
+        .first()
+        .expect("at leaset one delta should be present")
+        .len();
     let out = DMatrix::from_row_iterator(
         n_mcmc_iters,
         m,
-        deltas.into_iter().flat_map(|x| x.into_iter()),
+        deltas
+            .into_iter()
+            .flat_map(std::iter::IntoIterator::into_iter),
     );
 
-    Ok(out.to_pyarray_bound(py))
+    Ok(out.to_pyarray(py))
 }
 
 /// Borgonovo Indicies from DPMM density estimation.
@@ -226,20 +230,19 @@ fn single_loop_deltas_from_outputs<'a>(
     alpha: f64,
     seed: Option<&'a Bound<PyBytes>>,
 ) -> PyResult<Bound<'a, PyArray<f64, numpy::ndarray::Dim<[usize; 2]>>>> {
-    let mut rng = seed.map_or_else(
-        || StdRng::from_entropy(),
-        |seed| {
-            let bytes = seed.as_bytes();
+    let mut rng = seed.map_or_else(StdRng::from_os_rng, |seed| {
+        let bytes = seed.as_bytes();
 
-            let mut seed: [u8; 32] = [0; 32];
-            let n = std::cmp::min(seed.len(), bytes.len());
-            seed[0..n].copy_from_slice(&bytes[0..n]);
-            StdRng::from_seed(seed)
-        },
-    );
+        let mut seed: [u8; 32] = [0; 32];
+        let n = std::cmp::min(seed.len(), bytes.len());
+        seed[0..n].copy_from_slice(&bytes[0..n]);
+        StdRng::from_seed(seed)
+    });
 
     let ro_params = parameters.readonly();
-    let parameters: MatrixView<f64, Dyn, Dyn, Dyn, Dyn> = ro_params.try_as_matrix().unwrap();
+    let parameters: MatrixView<f64, Dyn, Dyn, Dyn, Dyn> = ro_params
+        .try_as_matrix()
+        .expect("The parameters should be viewable as a matrix");
     let parameters: Vec<DVector<f64>> = parameters
         .row_iter()
         .map(|x| DVector::from_iterator(parameters.shape().1, x.iter().copied()))
@@ -247,8 +250,8 @@ fn single_loop_deltas_from_outputs<'a>(
     let responses: Vec<f64> = responses.readonly().to_vec()?;
 
     let deltas = ::migsa::misa::single_loop_deltas_from_outputs(
-        parameters,
-        responses,
+        &parameters,
+        &responses,
         n_mcmc_iters,
         n_mc_delta_iters,
         warmup,
@@ -257,14 +260,19 @@ fn single_loop_deltas_from_outputs<'a>(
         alpha,
     );
 
-    let m = deltas.first().unwrap().len();
+    let m = deltas
+        .first()
+        .expect("there to be at least one delta")
+        .len();
     let out = DMatrix::from_row_iterator(
         n_mcmc_iters,
         m,
-        deltas.into_iter().flat_map(|x| x.into_iter()),
+        deltas
+            .into_iter()
+            .flat_map(std::iter::IntoIterator::into_iter),
     );
 
-    Ok(out.to_pyarray_bound(py))
+    Ok(out.to_pyarray(py))
 }
 
 /// A Python module implemented in Rust.

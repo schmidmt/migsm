@@ -2,9 +2,8 @@ pub mod data;
 pub mod dpmm;
 pub mod mcmc;
 pub mod misa;
-
 pub mod models;
-
+pub mod rvs;
 pub mod utils;
 
 /// Lens to an inner value to a struct or tuple.
@@ -28,12 +27,10 @@ impl<X> Lens<X, X> for IdentityLens {
     }
 }
 
-impl<'c, M, X, G, S> Lens<M, X> for (G, S)
+impl<M, X, G, S> Lens<M, X> for (G, S)
 where
     G: Fn(&M) -> &X,
     S: Fn(M, X) -> M,
-    M: 'c,
-    X: 'c,
 {
     fn set(&self, state: M, x: X) -> M {
         self.1(state, x)

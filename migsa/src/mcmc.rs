@@ -23,7 +23,10 @@ where
         model: M,
         data: &'a D,
         rng: &'a mut R,
-    ) -> SamplerIter<'a, M, D, Self, R> {
+    ) -> SamplerIter<'a, M, D, Self, R>
+    where
+        M: Model<D> + Clone + 'a,
+    {
         SamplerIter {
             sampler: self,
             model: Some(model),
@@ -194,11 +197,11 @@ where
                     scs: Vec<f64>,
                 }
 
-                let mut file = tempfile::NamedTempFile::new().unwrap();
+                let mut file = tempfile::NamedTempFile::new().expect("to be able to create a temp file");
 
-                serde_json::to_writer(&mut file, &Samples { mcs: mc, scs: sc }).unwrap();
+                serde_json::to_writer(&mut file, &Samples { mcs: mc, scs: sc }).expect("to write to file");
 
-                let (_, path) = file.keep().unwrap();
+                let (_, path) = file.keep().expect("to be able to make a persistent temp file");
                 let path = path.display();
 
                 panic!(
@@ -206,7 +209,7 @@ where
                     options.min_p_value
                 );
             }
-        })
+        });
     }
 }
 
@@ -221,12 +224,18 @@ where
 fn transpose2<T>(v: Vec<Vec<T>>) -> Vec<Vec<T>> {
     assert!(!v.is_empty());
     let len = v[0].len();
-    let mut iters: Vec<_> = v.into_iter().map(|n| n.into_iter()).collect();
+    let mut iters: Vec<_> = v
+        .into_iter()
+        .map(std::iter::IntoIterator::into_iter)
+        .collect();
     (0..len)
         .map(|_| {
             iters
                 .iter_mut()
-                .map(|n| n.next().unwrap())
+                .map(|n| {
+                    n.next()
+                        .expect("the 'Matrix' formed by the double vec should be square")
+                })
                 .collect::<Vec<T>>()
         })
         .collect()

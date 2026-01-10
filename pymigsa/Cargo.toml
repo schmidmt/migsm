@@ -9,9 +9,14 @@ name = "migsa"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.21"
+pyo3 = "0.27"
 migsa = { path = "../migsa" }
-numpy = { version = "0.21", features = ["nalgebra"] }
-nalgebra = "0.32"
-rv = { version = "0.16", features = ["arraydist", "serde"], path = "../../redpoll/rv" }
-rand = "0.8.5"
+numpy = { version = "0.27", features = ["nalgebra"] }
+nalgebra = "0.34"
+rv = { version = "0.19", features = ["arraydist", "serde"] }
+rand = "0.9"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"

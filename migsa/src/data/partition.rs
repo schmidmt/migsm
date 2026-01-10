@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use rand::Rng;
 use rv::{
-    misc::logsumexp,
+    misc::LogSumExp,
     prelude::{Crp, DataOrSuffStat},
-    traits::{ConjugatePrior, HasSuffStat, Rv, SuffStat},
+    traits::{ConjugatePrior, HasSuffStat, Rv, Sampleable, SuffStat},
 };
 
 #[derive(Clone)]
@@ -14,7 +14,7 @@ where
 {
     data: Vec<X>,
     assignments: Vec<Option<usize>>,
-    partition_data: Vec<T>,
+    component_data: Vec<T>,
     n_partitions: usize,
     counts: Vec<usize>,
     init: Arc<dyn Fn() -> T + 'static>,
@@ -40,7 +40,7 @@ where
         Self {
             data: Vec::new(),
             assignments: Vec::new(),
-            partition_data: Vec::new(),
+            component_data: Vec::new(),
             n_partitions: 0,
             counts: Vec::new(),
             init: Arc::new(init),
@@ -82,38 +82,46 @@ where
     }
 
     /// Get a reference to the data in this partition.
+    #[must_use]
     pub fn data(&self) -> &[X] {
         &self.data
     }
 
     /// Return the number data in this partition.
-    pub fn len(&self) -> usize {
+    #[must_use]
+    pub const fn len(&self) -> usize {
         self.data.len()
     }
 
     /// Check if the partition is empty
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 
-    pub fn n_partitions(&self) -> usize {
+    #[must_use]
+    pub const fn n_partitions(&self) -> usize {
         self.n_partitions
     }
 
+    #[must_use]
     pub fn partition_sizes(&self) -> &[usize] {
         &self.counts
     }
 
     /// Get a reference to the partition data in this partition.
+    #[must_use]
     pub fn partition_data(&self) -> &[T] {
-        &self.partition_data
+        &self.component_data
     }
 
     /// Get the assignment for an index.
+    #[must_use]
     pub fn assignment(&self, index: usize) -> Option<usize> {
-        self.assignments.get(index).cloned().flatten()
+        self.assignments.get(index).copied().flatten()
     }
 
+    #[must_use]
     pub fn assignments(&self) -> &[Option<usize>] {
         &self.assignments
     }
@@ -123,9 +131,9 @@ where
         let x = &self.data[index];
 
         // forget data from the last assignment
-        if let Some(old_assignment) = self.assignments.get(index).cloned().flatten() {
+        if let Some(old_assignment) = self.assignments.get(index).copied().flatten() {
             self.counts[old_assignment] -= 1;
-            (self.on_unassign)(&mut self.partition_data[old_assignment], x);
+            (self.on_unassign)(&mut self.component_data[old_assignment], x);
         }
 
         // Update the assignment
@@ -134,14 +142,14 @@ where
         // Ensure the assignment data and count data is present
         if assignment >= self.n_partitions {
             let to_add = assignment + 1 - self.n_partitions;
-            self.partition_data
+            self.component_data
                 .extend((0..to_add).map(|_| (self.init)()));
             self.counts.extend((0..to_add).map(|_| 0));
             self.n_partitions += to_add;
         }
 
         // Update the partition info
-        (self.on_assign)(&mut self.partition_data[assignment], x);
+        (self.on_assign)(&mut self.component_data[assignment], x);
         self.counts[assignment] += 1;
     }
 
@@ -149,7 +157,7 @@ where
     pub fn unassign(&mut self, index: usize) {
         if let Some(assignment) = self.assignments[index] {
             self.assignments[index] = None;
-            (self.on_unassign)(&mut self.partition_data[assignment], &self.data[index]);
+            (self.on_unassign)(&mut self.component_data[assignment], &self.data[index]);
             self.counts[assignment] -= 1;
 
             if self.counts[assignment] == 0 {
@@ -160,6 +168,8 @@ where
 
     /// Remove empty partitions and ensure partition indices start from 0 and increment by one.
     pub fn compact(&mut self) {
+        #[allow(clippy::needless_collect)] // We need this collect to we can manipulate the
+        // underlying partition...
         let to_simplify: Vec<usize> = self
             .counts
             .iter()
@@ -168,25 +178,22 @@ where
             .rev()
             .collect();
 
-        to_simplify
-            .into_iter()
-            .for_each(|i| self.remove_empty_partition(i));
+        for i in to_simplify {
+            self.remove_empty_partition(i);
+        }
     }
 
     fn remove_empty_partition(&mut self, partition: usize) {
         debug_assert_eq!(self.counts[partition], 0);
-        self.partition_data.remove(partition);
+        self.component_data.remove(partition);
         self.counts.remove(partition);
         self.n_partitions -= 1;
 
         self.assignments
             .iter_mut()
             .filter_map(|assn| {
-                if let Some(assn) = assn {
-                    (*assn >= partition).then_some(assn)
-                } else {
-                    None
-                }
+                assn.as_mut()
+                    .and_then(|assn| (*assn >= partition).then_some(assn))
             })
             .for_each(|i| *i -= 1);
     }
@@ -197,7 +204,7 @@ where
 
         self.n_partitions = 0;
         self.counts = Vec::with_capacity(crp_draw.k());
-        self.partition_data = Vec::with_capacity(crp_draw.k());
+        self.component_data = Vec::with_capacity(crp_draw.k());
         self.assignments = (0..self.data.len()).map(|_| None).collect();
 
         crp_draw
@@ -212,9 +219,13 @@ impl<X, T> Partition<T, X>
 where
     T: SuffStat<X> + Clone,
 {
-    /// Create a new empty partition with empty SuffStat generator.
+    /// Create a new empty partition with empty `SuffStat` generator.
     pub fn new_stat<F: Fn() -> T + 'static>(f: F) -> Self {
-        Self::new(f, |stat, x| stat.observe(x), |stat, x| stat.forget(x))
+        Self::new(
+            f,
+            rv::prelude::SuffStat::observe,
+            rv::prelude::SuffStat::forget,
+        )
     }
 
     /// Log marginal likelihood.
@@ -223,13 +234,14 @@ where
         Pr: ConjugatePrior<X, Fx>,
         Fx: Rv<X> + HasSuffStat<X, Stat = T>,
     {
-        self.partition_data
+        self.component_data
             .iter()
             .map(|stat| prior.ln_m(&rv::prelude::DataOrSuffStat::SuffStat(stat)))
             .sum()
     }
 
     /// Log Posterior Probability.
+    #[allow(clippy::cast_precision_loss)]
     pub fn ln_pp<Fx, Pr>(&self, prior: &Pr, alpha: f64, x: &X) -> f64
     where
         Pr: ConjugatePrior<X, Fx>,
@@ -244,15 +256,12 @@ where
 
         ln_weights.push(alpha.ln() - ln_total_weight);
 
-        logsumexp(
-            &self
-                .partition_data
-                .iter()
-                .chain(std::iter::once(&(self.init)()))
-                .zip(ln_weights)
-                .map(|(p, ln_w)| ln_w + prior.ln_pp(x, &DataOrSuffStat::SuffStat(p)))
-                .collect::<Vec<f64>>(),
-        )
+        self.component_data
+            .iter()
+            .chain(std::iter::once(&(self.init)()))
+            .zip(ln_weights)
+            .map(|(p, ln_w)| ln_w + prior.ln_pp(x, &DataOrSuffStat::SuffStat(p)))
+            .logsumexp()
     }
 }
 
@@ -262,7 +271,7 @@ mod tests {
     use rv::{
         data::{GaussianSuffStat, PoissonSuffStat},
         prelude::{Gaussian, NormalGamma},
-        traits::{HasSuffStat, Rv, SuffStat},
+        traits::{HasSuffStat, Sampleable},
     };
 
     use super::Partition;
@@ -275,22 +284,22 @@ mod tests {
         let mut rng = rand::rngs::SmallRng::seed_from_u64(0x1234);
         let data: Vec<f64> = dist.sample(1000, &mut rng);
         let mut part: Partition<GaussianSuffStat, f64> =
-            Partition::new_stat(move || empty_suffstat.clone());
+            Partition::new_stat(move || empty_suffstat);
         part.append(data);
 
         for i in 0..1000 {
             part.assign(i, 0);
         }
-        let prior = NormalGamma::new(0.0, 1.0, 1.0, 1.0).unwrap();
+        let prior = NormalGamma::new(0.0, 1.0, 1.0, 1.0).expect("given parameters to be valid");
 
         let a = -10.0;
         let b = 10.0;
         let n = 1000;
-        let delta = (b - a) / (n as f64);
+        let delta = (b - a) / f64::from(n);
 
         let mut sum = 0.0;
         for i in 0..n {
-            let x = a + (i as f64) * delta;
+            let x = f64::from(i).mul_add(delta, a);
             sum += part.ln_pp(&prior, 1.0, &x).exp() * delta;
         }
 
@@ -303,8 +312,8 @@ mod tests {
 
         let mut part: Partition<PoissonSuffStat, usize> = Partition::new(
             PoissonSuffStat::new,
-            |stat, x| stat.observe(x),
-            |stat, x| stat.forget(x),
+            rv::prelude::SuffStat::observe,
+            rv::prelude::SuffStat::forget,
         );
         part.append(data);
 
@@ -327,7 +336,7 @@ mod tests {
         assert!(part
             .partition_sizes()
             .iter()
-            .zip(part.partition_data.iter())
+            .zip(part.component_data.iter())
             .all(|(s, d)| d.n() == *s));
     }
 
