@@ -1,6 +1,6 @@
 use crate::models::Model;
 use rand::Rng;
-use rv::misc::{ks_two_sample, KsAlternative, KsMode};
+use rv::misc::{KsAlternative, KsMode, ks_two_sample};
 use serde::Serialize;
 
 pub mod samplers;
@@ -122,6 +122,11 @@ where
     M: ResampleModel<D> + PriorModel<D> + Model<D> + Clone + std::fmt::Debug,
     D: std::fmt::Debug + Clone,
 {
+    /// Draw samples from the Marginal Conditional Simulator
+    ///
+    /// Samples are drawn by
+    /// 1. Drawing from the prior
+    /// 2. Resampling the data from the model.
     fn marginal_conditional_sampler<R: Rng>(
         &mut self,
         iterations: usize,
@@ -136,6 +141,11 @@ where
             .collect()
     }
 
+    /// Draw samples from the Successive Conditional Simulator
+    ///
+    /// Samples are drawn by
+    /// 1. Resampling the data
+    /// 2. Stepping the model with the sampler under test
     fn successive_conditional_simulator<R: Rng>(
         &mut self,
         iterations: usize,

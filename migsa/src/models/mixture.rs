@@ -9,7 +9,6 @@ use rv::misc::{LogSumExp, ln_pflip};
 use rv::prelude::{Crp, DataOrSuffStat};
 use rv::traits::{ConjugatePrior, HasDensity, HasSuffStat, Rv, Sampleable, SuffStat};
 
-use crate::mcmc::samplers::stick::StickBreaking;
 use crate::utils::NoPrettyPrint;
 
 use super::Model;
@@ -25,7 +24,7 @@ impl DirichletProcessComponentWeights for Crp {
     fn component_probabilities(&self, partition: &rv::data::Partition) -> Vec<f64> {
         #[allow(clippy::cast_precision_loss)]
         let weights: Vec<f64> = partition
-            .z()
+            .counts()
             .iter()
             .map(|x| *x as f64)
             .chain(std::iter::once(self.alpha()))
@@ -38,16 +37,6 @@ impl DirichletProcessComponentWeights for Crp {
 
     fn empty_component_p(&self, n: usize) -> f64 {
         self.alpha() / (n as f64)
-    }
-}
-
-impl DirichletProcessComponentWeights for StickBreaking {
-    fn component_probabilities(&self, partition: &rv::data::Partition) -> Vec<f64> {
-        todo!()
-    }
-
-    fn empty_component_p(&self, n: usize) -> f64 {
-        todo!()
     }
 }
 
@@ -147,26 +136,6 @@ where
         }
     }
 
-    pub(crate) fn with_inner_values(
-        prior: Pr,
-        dirichlet_process: Dp,
-        partition_stats: Vec<Fx::Stat>,
-        assignments: Vec<Option<usize>>,
-        counts: Vec<usize>,
-    ) -> Self {
-        let fx = prior.draw(&mut rand::rngs::SmallRng::seed_from_u64(0x1234));
-        Self {
-            prior,
-            dirichlet_process,
-            assignments,
-            counts,
-            partition_stats,
-            empty_stat: fx.empty_suffstat(),
-            _phantom_x: PhantomData,
-            _phantom_fx: PhantomData,
-        }
-    }
-
     /// Create a new `ConjugateMixtureModel` from a set of given assignments
     ///
     /// # Panics
@@ -217,6 +186,26 @@ where
             empty_stat: fx.empty_suffstat(),
             assignments: assignments.to_vec(),
             counts,
+            _phantom_x: PhantomData,
+            _phantom_fx: PhantomData,
+        }
+    }
+
+    pub(crate) fn with_inner_values(
+        prior: Pr,
+        dirichlet_process: Dp,
+        partition_stats: Vec<Fx::Stat>,
+        assignments: Vec<Option<usize>>,
+        counts: Vec<usize>,
+    ) -> Self {
+        let fx = prior.draw(&mut rand::rngs::SmallRng::seed_from_u64(0x1234));
+        Self {
+            prior,
+            dirichlet_process,
+            assignments,
+            counts,
+            partition_stats,
+            empty_stat: fx.empty_suffstat(),
             _phantom_x: PhantomData,
             _phantom_fx: PhantomData,
         }
@@ -299,39 +288,6 @@ where
     }
 }
 
-/*
-impl<X, Y, Fx, Pr> ConjugateMixtureModel<X, Fx, Pr>
-where
-    X: Clone,
-    Fx: Rv<X> + HasSuffStat<X> + MultivariateRv<X, Y>,
-    Pr: ConjugatePrior<X, Fx>,
-    Fx::Stat: Clone + Debug,
-{
-    pub fn marginal_ln_f(&self, y: &Y) -> f64 {
-        // The ln poster predictive probabilities for each component
-        let component_posterior_ln_ps = self
-            .partition_stats
-            .iter()
-            .map(|stat| self.prior.ln_pp(x, &DataOrSuffStat::SuffStat(stat)))
-            .chain(std::iter::once(
-                self.prior
-                    .ln_pp(x, &DataOrSuffStat::SuffStat(&self.empty_stat)),
-            ));
-
-        // Component weights
-        let weights: &[f64] = self.component_weights();
-
-        let ln_ps: Vec<f64> = weights
-            .iter()
-            .zip(component_posterior_ln_ps)
-            .map(|(w, component_ln_pp)| w.ln() + component_ln_pp)
-            .collect();
-
-        logsumexp(&ln_ps)
-    }
-}
-*/
-
 impl<X, Fx, Pr, DP> rv::traits::Sampleable<Mixture<Fx>> for ConjugateMixtureModel<X, Fx, Pr, DP>
 where
     X: Clone,
@@ -363,14 +319,16 @@ where
     DP: DirichletProcessComponentWeights + HasDensity<rv::data::Partition>,
 {
     fn ln_f(&self, x: &DVector<f64>) -> f64 {
+        let component_weights = self.component_weights();
+        debug_assert_eq!(component_weights.len(), self.partition_stats.len() + 1);
         self.partition_stats
             .iter()
             .chain(std::iter::once(&self.empty_stat))
-            .zip(self.component_weights())
+            .zip(component_weights)
             .map(|(stat, weight)| {
                 self.prior.ln_pp(x, &DataOrSuffStat::SuffStat(stat)) + weight.ln()
             })
-            .sum()
+            .logsumexp()
     }
 }
 
@@ -384,23 +342,15 @@ macro_rules! cmm_float {
             DP: DirichletProcessComponentWeights + HasDensity<rv::data::Partition>,
         {
             fn ln_f(&self, x: &$kind) -> f64 {
-                // The ln poster predictive probabilities for each component
-                let component_posterior_ln_ps = self
-                    .partition_stats
+                let component_weights = self.component_weights();
+                debug_assert_eq!(component_weights.len(), self.partition_stats.len() + 1);
+                self.partition_stats
                     .iter()
-                    .map(|stat| self.prior.ln_pp(x, &DataOrSuffStat::SuffStat(stat)))
-                    .chain(std::iter::once(
-                        self.prior
-                            .ln_pp(x, &DataOrSuffStat::SuffStat(&self.empty_stat)),
-                    ));
-
-                // Component weights
-                let weights = self.component_weights();
-
-                weights
-                    .iter()
-                    .zip(component_posterior_ln_ps)
-                    .map(|(w, component_ln_pp)| w.ln() + component_ln_pp)
+                    .chain(std::iter::once(&self.empty_stat))
+                    .zip(component_weights)
+                    .map(|(stat, weight)| {
+                        self.prior.ln_pp(x, &DataOrSuffStat::SuffStat(stat)) + weight.ln()
+                    })
                     .logsumexp()
             }
         }
@@ -756,7 +706,7 @@ mod tests {
             ConjugateMixtureModel::new(
                 NormalGamma::new_unchecked(0.0, 1.0, 1.0, 1.0),
                 data.iter(),
-                Crp::new(1.0, data.len()).unwrap(),
+                Crp::new_unchecked(1.0, data.len()),
                 &mut rng,
             );
 
@@ -775,7 +725,7 @@ mod tests {
             );
         }
 
-        let ps: Vec<f64> = xs.iter().map(|x| mm.ln_f(x).exp()).collect();
+        let ps: Vec<f64> = xs.iter().map(|x| mm.f(x)).collect();
 
         let int: f64 = trapz(&ps, &xs);
 

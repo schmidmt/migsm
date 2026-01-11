@@ -32,12 +32,10 @@ where
             let x = &data[index];
 
             // TODO: Unchanged log weights could be cached.
-            let mut log_weights: Vec<f64> = (0..model.n_partitions())
+            let log_weights: Vec<f64> = (0..model.n_partitions())
                 .map(|i| model.ln_pp_partition(x, i))
+                .chain(std::iter::once(model.ln_pp_empty(x)))
                 .collect();
-
-            let new_component_pp = model.ln_pp_empty(x);
-            log_weights.push(new_component_pp);
 
             let new_assignment = ln_pflip(&log_weights, false, rng);
             model.assign(index, new_assignment, data);
@@ -104,11 +102,8 @@ mod tests {
         }
     }
 
-    impl<DP> PriorModel<Vec<f64>> for ConjugateMixtureModel<f64, Gaussian, NormalGamma, DP>
-    where
-        DP: DirichletProcessComponentWeights + Sampleable<Partition> + HasDensity<Partition>,
-    {
-        fn draw_from_prior<R: rand::Rng>(n: usize, alpha: f64, rng: &mut R) -> Self {
+    impl PriorModel<Vec<f64>> for ConjugateMixtureModel<f64, Gaussian, NormalGamma, Crp> {
+        fn draw_from_prior<R: rand::Rng>(rng: &mut R) -> Self {
             let prior = NormalGamma::new_unchecked(0.0, 1.0, 1.0, 1.0);
             let crp = Crp::new_unchecked(10.0, N);
 
@@ -117,11 +112,10 @@ mod tests {
             let assignments: Vec<Option<usize>> = partition.z().iter().map(|x| Some(*x)).collect();
 
             // Initialize stats
-            let counts: Vec<usize> = partition.counts().clone();
-            let empty_stat: GaussianSuffStat = GaussianSuffStat::new();
+            let counts = partition.counts();
 
             // Accumulate the stats for each partition
-            let partition_stats = counts
+            let partition_stats: Vec<GaussianSuffStat> = counts
                 .iter()
                 .map(|&count| {
                     let mut stat = GaussianSuffStat::new();
@@ -132,13 +126,7 @@ mod tests {
                 })
                 .collect();
 
-            Self::with_inner_values(
-                prior,
-                crp,
-                assignments,
-                counts.into_iter().map(|x| Some(x)).collect(),
-                partition_stats,
-            )
+            Self::with_inner_values(prior, crp, partition_stats, assignments, counts.to_vec())
         }
     }
 
@@ -146,7 +134,7 @@ mod tests {
     #[test]
     fn geweke() {
         let sampler = PartitionGibbs::default();
-        let mut rng = SmallRng::seed_from_u64(0x1234);
+        let mut rng = SmallRng::seed_from_u64(0x1235);
 
         sampler.assert_geweke(
             crate::mcmc::GewekeTestOptions {
@@ -189,7 +177,7 @@ mod tests {
         let mut model = ConjugateMixtureModel::with_assignment(
             NormalGamma::new_unchecked(0.0, 1.0, 1.0, 1.0),
             data.iter(),
-            1.0,
+            Crp::new_unchecked(10.0, data.len()),
             &[
                 Some(0),
                 Some(0),
@@ -206,8 +194,8 @@ mod tests {
 
         // Check the initial config is what we expect.
 
-        assert_eq!(model.counts, &[4, 1, 1, 4]);
-        let stat: GaussianSuffStat = model.partition_stats[0];
+        assert_eq!(model.counts(), &[4, 1, 1, 4]);
+        let stat: GaussianSuffStat = model.partition_stats()[0];
         assert::close(stat.mean(), 24.745_297_385_255_835, 1E-10);
         assert::close(stat.sum_x_sq(), 3_572.133_866_521_219, 1E-10);
         assert::close(stat.sum_x(), 98.981_189_541_023_34, 1E-10);
@@ -215,7 +203,7 @@ mod tests {
         model.unassign(1, &data);
 
         assert_eq!(
-            model.assignments,
+            model.assignments(),
             &[
                 Some(0),
                 None,
@@ -231,7 +219,7 @@ mod tests {
         );
         let expected_mean = (data[0] + data[6] + data[8]) / 3.0;
 
-        let stat: &GaussianSuffStat = &model.partition_stats[0];
+        let stat: &GaussianSuffStat = &model.partition_stats()[0];
 
         assert::close(expected_mean, stat.mean(), 1E-9);
 
@@ -265,20 +253,20 @@ mod tests {
         let mut model = ConjugateMixtureModel::with_assignment(
             NormalGamma::new_unchecked(0.0, 1.0, 1.0, 1.0),
             data.iter(),
-            1.0,
+            Crp::new_unchecked(10.0, data.len()),
             &[None, None, None, None, None],
         );
 
-        assert!(model.counts.is_empty());
+        assert!(model.counts().is_empty());
 
         model.assign(0, 3, &data);
-        assert_eq!(model.counts, &[0, 0, 0, 1]);
+        assert_eq!(model.counts(), &[0, 0, 0, 1]);
 
         model.assign(3, 1, &data);
-        assert_eq!(model.counts, &[0, 1, 0, 1]);
+        assert_eq!(model.counts(), &[0, 1, 0, 1]);
 
         model.unassign(0, &data);
-        assert_eq!(model.counts, &[0, 1]);
+        assert_eq!(model.counts(), &[0, 1]);
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -295,7 +283,7 @@ mod tests {
         let model = ConjugateMixtureModel::new(
             NormalGamma::new_unchecked(0.0, 1.0, 1.0, 1.0),
             data.iter(),
-            1.0,
+            Crp::new_unchecked(1.0, data.len()),
             &mut rng,
         );
 
@@ -309,7 +297,7 @@ mod tests {
 
             for p in 0..data.len() {
                 for q in (p + 1)..data.len() {
-                    if next_model.assignments[p] == next_model.assignments[q] {
+                    if next_model.assignments()[p] == next_model.assignments()[q] {
                         a[p][q] += 1.0 / (n_samples as f64);
                         a[q][p] += 1.0 / (n_samples as f64);
                     }
@@ -332,13 +320,13 @@ mod tests {
         println!(
             "{:?}",
             model
-                .assignments
+                .assignments()
                 .into_iter()
                 .map(|x| x.expect("to be some"))
                 .collect::<Vec<usize>>()
         );
 
-        assert_eq!(model.counts.len(), 2);
+        assert_eq!(model.counts().len(), 2);
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -357,12 +345,13 @@ mod tests {
 
         data.sort_by(f64::total_cmp);
 
-        let model: ConjugateMixtureModel<f64, Gaussian, NormalGamma> = ConjugateMixtureModel::new(
-            NormalGamma::new_unchecked(0.0, 1.0, 1.0, 1.0),
-            data.iter(),
-            1.0,
-            &mut rng,
-        );
+        let model: ConjugateMixtureModel<f64, Gaussian, NormalGamma, Crp> =
+            ConjugateMixtureModel::new(
+                NormalGamma::new_unchecked(0.0, 1.0, 1.0, 1.0),
+                data.iter(),
+                Crp::new_unchecked(10.0, data.len()),
+                &mut rng,
+            );
 
         let mut sampler = PartitionGibbs::new();
 
