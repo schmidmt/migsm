@@ -48,7 +48,7 @@ struct InnerData<D> {
 
 struct InnerSampler<D, M, S>
 where
-    M: Model<D>,
+    M: Model<D> + Clone,
     S: Sampler<M, D>,
 {
     joint_samplers: Vec<S>,
@@ -71,8 +71,9 @@ where
 
 impl<D, M, S> Sampler<InnerModels<D, M>, InnerData<D>> for InnerSampler<D, M, S>
 where
-    M: Model<D>,
+    M: Model<D> + Clone,
     S: Sampler<M, D>,
+    D: Clone,
 {
     fn step<R: Rng>(
         &mut self,

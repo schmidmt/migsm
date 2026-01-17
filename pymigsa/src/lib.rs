@@ -10,13 +10,13 @@ use pyo3::types::PyBytes;
 use pyo3::{prelude::*, Bound};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-use rv::dist::{Gaussian, Mixture, NormalGamma};
+use rv::dist::{Crp, Gaussian, Mixture, NormalGamma};
 use rv::traits::{HasDensity, Sampleable};
 
 #[pyclass]
 #[derive(Debug)]
 pub struct Igmm {
-    mixture_model: Option<ConjugateMixtureModel<f64, Gaussian, NormalGamma>>,
+    mixture_model: Option<ConjugateMixtureModel<f64, Gaussian, NormalGamma, Crp>>,
     rng: rand::rngs::SmallRng,
     sampler: PartitionGibbs,
     data: Vec<f64>,
@@ -35,7 +35,7 @@ impl Igmm {
             mixture_model: Some(ConjugateMixtureModel::new(
                 NormalGamma::new_unchecked(0.0, 1.0, 1.0, 1.0),
                 data.iter(),
-                alpha,
+                Crp::new_unchecked(alpha, data.len()),
                 &mut rng,
             )),
             rng,
@@ -117,7 +117,17 @@ pub struct GaussianMixture(Mixture<Gaussian>);
 #[pymethods]
 impl GaussianMixture {
     fn weights(&self) -> Vec<f64> {
-        self.0.weights().to_owned()
+        self.0.weights().clone()
+    }
+
+    fn components<'py>(&self, py: Python<'py>) -> Result<Vec<Bound<'py, PyAny>>, PyErr> {
+        let stats = PyModule::import(py, "scipy.stats")?;
+        let norm = stats.getattr("norm")?;
+        self.0
+            .components()
+            .iter()
+            .map(|n| norm.call1((n.mu(), n.sigma())))
+            .collect::<Result<Vec<_>, PyErr>>()
     }
 
     fn p(&self, x: f64) -> f64 {

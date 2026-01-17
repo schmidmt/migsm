@@ -8,7 +8,7 @@ pub mod samplers;
 /// Trait for Markov Chain Monte Carlo Samplers.
 pub trait Sampler<M, D>: Sized
 where
-    M: Model<D>,
+    M: Model<D> + Clone,
 {
     /// Step the Sampler.
     fn step<R: Rng>(&mut self, model: M, data: &D, rng: &mut R) -> M;
@@ -43,8 +43,8 @@ where
         f: F,
     ) -> impl Iterator<Item = T> {
         (0..).scan(model, move |model, _| {
-            take(model, |model| self.step(model, data, rng));
-
+            //*model = self.step(model.clone(), data, rng);
+            take(model, |m| self.step(m, data, rng));
             Some(f(model))
         })
     }
@@ -53,7 +53,7 @@ where
 pub struct SamplerIter<'a, M, D, S, R>
 where
     S: Sampler<M, D>,
-    M: Model<D>,
+    M: Model<D> + Clone,
     R: Rng,
 {
     sampler: &'a mut S,

@@ -20,7 +20,7 @@ impl PartitionGibbs {
 
 impl<X, M, D> Sampler<M, D> for PartitionGibbs
 where
-    M: PartitionModel<X, D>,
+    M: PartitionModel<X, D> + Clone,
     D: std::ops::Index<usize, Output = X>,
 {
     fn step<R: Rng>(&mut self, mut model: M, data: &D, rng: &mut R) -> M {
@@ -97,6 +97,7 @@ mod tests {
                 let assignment = self.assignments()[i].expect("Should be assigned");
                 self.partition_stats_mut()[assignment].observe(&new_data_point);
             }
+            self.clear_caches();
 
             new_data
         }

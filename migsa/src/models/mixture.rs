@@ -1,5 +1,6 @@
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::sync::OnceLock;
 
 use nalgebra::DVector;
 use rand::{Rng, SeedableRng};
@@ -36,7 +37,8 @@ impl DirichletProcessComponentWeights for Crp {
     }
 
     fn empty_component_p(&self, n: usize) -> f64 {
-        self.alpha() / (n as f64)
+        //assert_eq!(self.n(), n);
+        self.alpha() / ((n as f64) + self.alpha())
     }
 }
 
@@ -54,6 +56,10 @@ where
     counts: Vec<usize>,
     partition_stats: Vec<Fx::Stat>,
     empty_stat: Fx::Stat,
+    n: usize,
+    log_m_cache: OnceLock<f64>,
+    dp_log_f_cache: OnceLock<f64>,
+    component_weights_cache: OnceLock<Vec<f64>>,
     _phantom_x: PhantomData<X>,
     _phantom_fx: PhantomData<Fx>,
 }
@@ -124,6 +130,8 @@ where
             partition_stats[asgn].observe(x);
         });
 
+        let n = counts.iter().sum();
+
         Self {
             prior,
             dirichlet_process: prior_process,
@@ -131,9 +139,19 @@ where
             empty_stat: fx.empty_suffstat(),
             assignments,
             counts,
+            n,
+            log_m_cache: OnceLock::new(),
+            dp_log_f_cache: OnceLock::new(),
+            component_weights_cache: OnceLock::new(),
             _phantom_x: PhantomData,
             _phantom_fx: PhantomData,
         }
+    }
+
+    pub fn clear_caches(&mut self) {
+        self.log_m_cache.take();
+        self.dp_log_f_cache.take();
+        self.component_weights_cache.take();
     }
 
     /// Create a new `ConjugateMixtureModel` from a set of given assignments
@@ -179,6 +197,8 @@ where
             }
         });
 
+        let n = counts.iter().sum();
+
         Self {
             prior,
             dirichlet_process,
@@ -186,12 +206,16 @@ where
             empty_stat: fx.empty_suffstat(),
             assignments: assignments.to_vec(),
             counts,
+            n,
+            log_m_cache: OnceLock::new(),
+            dp_log_f_cache: OnceLock::new(),
+            component_weights_cache: OnceLock::new(),
             _phantom_x: PhantomData,
             _phantom_fx: PhantomData,
         }
     }
 
-    pub(crate) fn with_inner_values(
+    pub fn with_inner_values(
         prior: Pr,
         dirichlet_process: Dp,
         partition_stats: Vec<Fx::Stat>,
@@ -199,6 +223,7 @@ where
         counts: Vec<usize>,
     ) -> Self {
         let fx = prior.draw(&mut rand::rngs::SmallRng::seed_from_u64(0x1234));
+        let n = counts.iter().sum();
         Self {
             prior,
             dirichlet_process,
@@ -206,12 +231,18 @@ where
             counts,
             partition_stats,
             empty_stat: fx.empty_suffstat(),
+            n,
+            log_m_cache: OnceLock::new(),
+            dp_log_f_cache: OnceLock::new(),
+            component_weights_cache: OnceLock::new(),
             _phantom_x: PhantomData,
             _phantom_fx: PhantomData,
         }
     }
 
     fn remove_partition(&mut self, partition_index: usize) {
+        self.clear_caches();
+
         // remove stats, counts
         self.partition_stats.swap_remove(partition_index);
         self.counts.swap_remove(partition_index);
@@ -264,27 +295,33 @@ where
 {
     /// Portion of the `log_score` from the inner distributions marginal probability.
     pub fn log_m(&self) -> f64 {
-        self.partition_stats
-            .iter()
-            .map(|ps| self.prior.ln_m(&DataOrSuffStat::SuffStat(ps)))
-            .sum()
+        *self.log_m_cache.get_or_init(|| {
+            self.partition_stats
+                .iter()
+                .map(|ps| self.prior.ln_m(&DataOrSuffStat::SuffStat(ps)))
+                .sum()
+        })
     }
 
     /// Portion of `log_score` from the CRP prior
     pub fn dp_log_f(&self) -> f64 {
-        let part = rv::data::Partition::new_unchecked(
-            self.assignments.iter().flatten().copied().collect(),
-            self.counts.clone(),
-        );
-        self.dirichlet_process.ln_f(&part)
-    }
-
-    fn component_weights(&self) -> Vec<f64> {
-        self.dirichlet_process
-            .component_probabilities(&Partition::new_unchecked(
+        *self.dp_log_f_cache.get_or_init(|| {
+            let part = rv::data::Partition::new_unchecked(
                 self.assignments.iter().flatten().copied().collect(),
                 self.counts.clone(),
-            ))
+            );
+            self.dirichlet_process.ln_f(&part)
+        })
+    }
+
+    fn component_weights(&self) -> &[f64] {
+        self.component_weights_cache.get_or_init(|| {
+            self.dirichlet_process
+                .component_probabilities(&Partition::new_unchecked(
+                    self.assignments.iter().flatten().copied().collect(),
+                    self.counts.clone(),
+                ))
+        })
     }
 }
 
@@ -297,7 +334,7 @@ where
     DP: DirichletProcessComponentWeights + HasDensity<rv::data::Partition>,
 {
     fn draw<R: Rng>(&self, rng: &mut R) -> Mixture<Fx> {
-        let weights: Vec<f64> = self.component_weights();
+        let weights = self.component_weights();
 
         let components = self
             .partition_stats
@@ -306,33 +343,11 @@ where
             .map(|s| self.prior.posterior(&DataOrSuffStat::SuffStat(s)).draw(rng))
             .collect();
 
-        Mixture::new_unchecked(weights, components)
+        Mixture::new_unchecked(weights.to_vec(), components)
     }
 }
 
-impl<Fx, Pr, DP> rv::traits::HasDensity<DVector<f64>>
-    for ConjugateMixtureModel<DVector<f64>, Fx, Pr, DP>
-where
-    Fx: Rv<DVector<f64>> + HasSuffStat<DVector<f64>>,
-    Pr: ConjugatePrior<DVector<f64>, Fx>,
-    Fx::Stat: Clone + Debug,
-    DP: DirichletProcessComponentWeights + HasDensity<rv::data::Partition>,
-{
-    fn ln_f(&self, x: &DVector<f64>) -> f64 {
-        let component_weights = self.component_weights();
-        debug_assert_eq!(component_weights.len(), self.partition_stats.len() + 1);
-        self.partition_stats
-            .iter()
-            .chain(std::iter::once(&self.empty_stat))
-            .zip(component_weights)
-            .map(|(stat, weight)| {
-                self.prior.ln_pp(x, &DataOrSuffStat::SuffStat(stat)) + weight.ln()
-            })
-            .logsumexp()
-    }
-}
-
-macro_rules! cmm_float {
+macro_rules! cmm_impl {
     ($kind: ty) => {
         impl<Fx, Pr, DP> rv::traits::HasDensity<$kind> for ConjugateMixtureModel<$kind, Fx, Pr, DP>
         where
@@ -383,8 +398,10 @@ macro_rules! cmm_float {
     };
 }
 
-cmm_float!(f64);
-cmm_float!(f32);
+cmm_impl!(DVector<f64>);
+cmm_impl!(DVector<f32>);
+cmm_impl!(f64);
+cmm_impl!(f32);
 
 impl<X, Fx, Pr, D, DP> Model<D> for ConjugateMixtureModel<X, Fx, Pr, DP>
 where
@@ -400,25 +417,30 @@ where
     }
 }
 
-impl<X, Fx, Pr, D, DP> PartitionModel<X, D> for ConjugateMixtureModel<X, Fx, Pr, DP>
+impl<X, Fx, Pr, D> PartitionModel<X, D> for ConjugateMixtureModel<X, Fx, Pr, Crp>
 where
     X: Clone + std::fmt::Debug,
     Fx: Rv<X> + HasSuffStat<X> + std::fmt::Debug,
     Pr: ConjugatePrior<X, Fx> + std::fmt::Debug,
     Fx::Stat: Clone + Debug + PartialEq,
     D: std::ops::Index<usize, Output = X>,
-    DP: DirichletProcessComponentWeights
-        + HasDensity<rv::data::Partition>
-        + Sampleable<rv::data::Partition>,
+    //DP: DirichletProcessComponentWeights
+    //    + HasDensity<rv::data::Partition>
+    //    + Sampleable<rv::data::Partition>,
 {
     fn assignments(&self) -> &[Option<usize>] {
         &self.assignments
     }
 
     fn assign(&mut self, idx: usize, partition_index: usize, data: &D) {
+        self.clear_caches();
+
         if self.assignments[idx].is_some() {
             // Remove from the source part if this datum is assigned to one
             self.unassign(idx, data);
+        } else {
+            // Here, this is assigning an unassined value, so we need to add 1 back to n.
+            self.n += 1;
         }
 
         // Add additional partitions if the `partition_index` is larger
@@ -438,6 +460,9 @@ where
     }
 
     fn unassign(&mut self, idx: usize, data: &D) {
+        self.clear_caches();
+
+        self.n -= 1;
         if let Some(assigned_to) = self.assignments[idx].take() {
             self.counts[assigned_to] -= 1;
             self.partition_stats[assigned_to].forget(&data[idx]);
@@ -453,13 +478,18 @@ where
         }
     }
 
+    /// Log Posterior Predictive for a particular datum `x` in partition `partition_index`.
     #[allow(clippy::cast_precision_loss)]
     fn ln_pp_partition(&self, x: &X, partition_index: usize) -> f64 {
         let stat = &self.partition_stats[partition_index];
 
+        let p_z = self.dirichlet_process.component_probabilities(
+            &Partition::from_z(self.assignments.iter().flatten().copied().collect()).unwrap(),
+        )[partition_index];
+
         // TODO: This is unnormalized, we should have a ln_pp_partition and
         // ln_pp_partition_unnormed as seperate functions
-        (self.counts[partition_index] as f64).ln()
+        p_z.ln()
             + self
                 .prior
                 .ln_pp(x, &rv::prelude::DataOrSuffStat::SuffStat(stat))
@@ -467,11 +497,7 @@ where
 
     fn ln_pp_empty(&self, x: &X) -> f64 {
         let suff_stat = rv::prelude::DataOrSuffStat::SuffStat(&self.empty_stat);
-        self.prior.ln_pp(x, &suff_stat)
-            + self
-                .dirichlet_process
-                .empty_component_p(self.counts.len())
-                .ln()
+        self.prior.ln_pp(x, &suff_stat) + self.dirichlet_process.empty_component_p(self.n).ln()
     }
 
     fn n_partitions(&self) -> usize {
@@ -730,5 +756,20 @@ mod tests {
         let int: f64 = trapz(&ps, &xs);
 
         assert::close(int, 1.0, 1e-4);
+    }
+
+    #[test]
+    fn crp_weights() {
+        let crp = Crp::new_unchecked(11.0, 6);
+        assert::close(crp.empty_component_p(crp.n()), 11.0 / (11.0 + 6.0), 1e-5);
+
+        let ps = crp.component_probabilities(&Partition::from_z(vec![0, 0, 1, 1, 2, 3]).unwrap());
+
+        assert_eq!(ps.len(), 5);
+        assert::close(ps[0], 2.0 / (11.0 + 6.0), 1e-5);
+        assert::close(ps[1], 2.0 / (11.0 + 6.0), 1e-5);
+        assert::close(ps[2], 1.0 / (11.0 + 6.0), 1e-5);
+        assert::close(ps[3], 1.0 / (11.0 + 6.0), 1e-5);
+        assert::close(ps[4], 11.0 / (11.0 + 6.0), 1e-5);
     }
 }
